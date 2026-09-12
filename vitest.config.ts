@@ -5,7 +5,7 @@ export default defineConfig({
     environment: 'node',
     // Integration tests share one database; run files one at a time so
     // truncation and inserts from different files never interleave.
-    // (Top-level only in vitest 3; unit files are cheap enough not to care.)
+    // (Top-level only in vitest 5; unit files are cheap enough not to care.)
     fileParallelism: false,
     projects: [
       {

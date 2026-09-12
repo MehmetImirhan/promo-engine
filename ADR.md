@@ -360,6 +360,8 @@ and computed with `decimal.js`. They are the reason ingest cannot be a
 | Completion detected too early (processors finish before splitter sets total) | No counter. Job is complete when splitter status is `SPLIT_DONE` **and** no chunk is non-DONE; checked by whichever finishes last |
 | Same SKU appears twice in one file, chunks land out of order, or a DLQ'd chunk is replayed later | Monotonic `source_seq = (job_seq << 32) \| row_no` on every row; `ON CONFLICT (sku) DO UPDATE ... WHERE EXCLUDED.source_seq > products.source_seq`. Newest wins in any order; an old job's replay can never overwrite a newer job's data |
 | Concurrent multi-row upserts deadlock | Every batch is `ORDER BY sku` before upsert — deterministic lock order |
+| Same SKU twice in one chunk | Postgres rejects an `ON CONFLICT DO UPDATE` that touches one row twice, so the processor keeps only the highest `row_no` per SKU before the upsert — the same newest-wins rule `source_seq` applies across chunks |
+| Chunk size vs. SQL parameter limits | Not a constraint: the upsert passes one array per column (`unnest`), so its parameter count is constant. `INGEST_CHUNK_SIZE` (max 10,000) is a memory bound — one chunk is what a splitter or processor invocation holds |
 | One malformed row poisons a 1,000-row chunk | Validate first; partition valid/invalid; upsert valid; record invalid in `ingest_row_errors`. Row errors are data, not exceptions |
 | Two processors create the same new category | `INSERT ... ON CONFLICT (name) DO NOTHING` then select |
 | 500 chunks fan out to 500 DB connections | The queue is the throttle: worker concurrency cap locally; reserved concurrency + RDS Proxy/PgBouncer in production |
