@@ -24,12 +24,14 @@ has a default that matches `docker-compose.yml`.
 | Script              | What it does                                   |
 |---------------------|------------------------------------------------|
 | `npm run dev`       | API server with reload                         |
-| `npm run worker`    | Ingest worker (later session)                  |
+| `npm run worker`    | Ingest worker: splitter + chunk processor (`-- --only split\|process-chunk`) |
 | `npm run migrate`   | Apply `db/migrations/*.sql` in order           |
 | `npm run seed`      | Dev data: `--categories N --products N`, idempotent |
 | `npm run typecheck` | `tsc --noEmit`                                 |
 | `npm test`          | Unit + integration tests (needs docker compose) |
 | `npm run build`     | Compile to `dist/`                             |
+| `npm run ingest:generate` | Vendor CSV with realistic mess: `-- --rows N --out file [--seed S]` |
+| `npm run ingest:measure`  | 500k-row ingest under a 128 MB heap; prints wall time, RSS, continuations |
 
 ## Tests
 
@@ -89,4 +91,43 @@ product scope wins.
 - `GET /health` — process is up (no dependencies)
 - `GET /ready` — Postgres and Redis reachable
 
-Ingest endpoints are added in a later session.
+### Ingest (Scenario A)
+
+Vendor files are CSV with header `sku,name,category,cost,stock_quantity`
+(any column order; extra columns ignored). `cost` is the vendor cost; the
+pricing rules in `src/ingest/pricing-rules.ts` turn it into `base_price`
+(margin per category with a global floor, rounded to a `.99` ending, rows
+that would land below cost are rejected as row errors).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/ingest/jobs` | `multipart/form-data` with `vendor_id` and `file`. The file is streamed to storage while hashed; `202 { id, status, created: true }`. The same file for the same vendor again → `200` with the existing job. |
+| `GET`  | `/ingest/jobs/:id` | `status`, `split_invocations`, `chunks` by status, `rows` `{ total, valid, invalid, applied }`, `error_count`. |
+| `POST` | `/ingest/jobs/:id/replay-failed` | Re-enqueues `FAILED` chunks, chunks stuck in `PROCESSING` past the invocation timeout, and an unfinished split. Safe in any order. |
+
+Job status: `PENDING → SPLITTING → SPLIT_DONE → COMPLETED | PARTIAL`
+(`PARTIAL` = some chunk failed after every retry; `FAILED` = the file itself
+could not be split, e.g. missing header columns). Row-level problems never
+fail a job: they are recorded in `ingest_row_errors` with the raw row and a
+path per issue.
+
+Pipeline (`npm run worker`): the splitter streams the file with `csv-parse`,
+writes chunks of `INGEST_CHUNK_SIZE` rows to storage, checkpoints after
+every chunk and re-enqueues itself when `remainingTimeMs()` is below
+`INGEST_SPLIT_RESERVE_MS`; each chunk is one queue message and one
+processor invocation (validate → price → sorted single-statement upsert).
+Newest wins by `source_seq = (job_seq << 32) | row_no`, so duplicate SKUs,
+out-of-order chunks and replays converge. Job completion is derived from
+chunk statuses, never counted. Storage is `STORAGE_DIR` (default `./data`)
+behind the `Storage` interface; queues are BullMQ behind the `Queue`
+interface. Design and the production mapping (S3, SQS, Lambda) are in
+ADR §7.
+
+To try it locally:
+
+```sh
+npm run ingest:generate -- --rows 20000 --out data/vendor.csv
+npm run worker                                   # in a second terminal
+curl -F vendor_id=acme -F file=@data/vendor.csv localhost:3000/ingest/jobs
+curl localhost:3000/ingest/jobs/<id>
+```
