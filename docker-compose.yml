@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-promo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-promo}
+      POSTGRES_DB: ${POSTGRES_DB:-promo}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # The postgres:18 image keeps PGDATA under /var/lib/postgresql/18/...;
+      # mount the parent so major-version upgrades keep their own directories.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-promo} -d ${POSTGRES_DB:-promo}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
