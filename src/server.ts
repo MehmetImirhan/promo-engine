@@ -3,7 +3,9 @@ import { createApp } from './app.js';
 import { createRedis } from './cache/redis.js';
 import { ConfigError } from './config/env.js';
 import { createDb, createPool } from './db/index.js';
+import { createIngestQueues, createQueueConnection } from './queue/index.js';
 import { createLogger } from './shared/logger.js';
+import { LocalStorage } from './storage/index.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
@@ -21,7 +23,26 @@ async function main(): Promise<void> {
   // Fail open: the API starts even if Redis is down; ioredis keeps retrying in the background.
   redis.connect().catch((err: Error) => logger.warn({ err: err.message }, 'redis unavailable at startup'));
 
-  const app = createApp({ pool, db, redis, logger });
+  // Ingest: the API only enqueues; src/worker.ts consumes.
+  const queueConnection = createQueueConnection(env.REDIS_URL);
+  queueConnection.on('error', (err) => logger.warn({ err: err.message }, 'queue redis connection error'));
+  const queues = createIngestQueues({
+    connection: queueConnection,
+    logger,
+    maxAttempts: env.INGEST_MAX_ATTEMPTS,
+    invocationTimeoutMs: env.INGEST_INVOCATION_TIMEOUT_MS,
+  });
+  const storage = new LocalStorage(env.STORAGE_DIR);
+
+  const app = createApp({
+    pool,
+    db,
+    redis,
+    logger,
+    storage,
+    queues,
+    ingest: { staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS },
+  });
   const server: Server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, 'api listening');
   });
@@ -39,7 +60,7 @@ async function main(): Promise<void> {
     forceExit.unref();
 
     server.close(() => {
-      void Promise.allSettled([pool.end(), redis.quit()]).then(() => {
+      void Promise.allSettled([queues.close(), queueConnection.quit(), pool.end(), redis.quit()]).then(() => {
         logger.info('shutdown complete');
         process.exit(0);
       });

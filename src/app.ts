@@ -3,18 +3,25 @@ import express, { type Express, type Request, type Response } from 'express';
 import { pinoHttp } from 'pino-http';
 import type { Redis } from './cache/redis.js';
 import type { Db, Pool } from './db/index.js';
+import { ingestRouter } from './ingest/router.js';
+import { IngestService, type IngestServiceOptions } from './ingest/service.js';
 import { productsRouter } from './products/router.js';
 import { ProductsService } from './products/service.js';
 import { promotionsRouter } from './promotions/router.js';
 import { PromotionsService } from './promotions/service.js';
 import { errorHandler, notFoundHandler } from './shared/error-middleware.js';
 import type { Logger } from './shared/logger.js';
+import type { IngestQueues } from './queue/index.js';
+import type { Storage } from './storage/index.js';
 
 export interface AppDeps {
   pool: Pool;
   db: Db;
   redis: Redis;
   logger: Logger;
+  storage: Storage;
+  queues: IngestQueues;
+  ingest: IngestServiceOptions;
 }
 
 type CheckStatus = 'ok' | 'down';
@@ -28,7 +35,7 @@ async function check(probe: () => Promise<unknown>): Promise<CheckStatus> {
   }
 }
 
-export function createApp({ pool, db, redis, logger }: AppDeps): Express {
+export function createApp({ pool, db, redis, logger, storage, queues, ingest }: AppDeps): Express {
   const app = express();
   app.disable('x-powered-by');
 
@@ -72,6 +79,7 @@ export function createApp({ pool, db, redis, logger }: AppDeps): Express {
 
   app.use(productsRouter(new ProductsService(db)));
   app.use(promotionsRouter(new PromotionsService(db)));
+  app.use(ingestRouter(new IngestService(db, storage, queues, ingest)));
 
   app.use(notFoundHandler);
   app.use(errorHandler);
