@@ -13,12 +13,12 @@
 
 | # | Decision | One-line rationale |
 |---|----------|--------------------|
-| 1 | Express + TypeScript, Postgres, Redis, BullMQ; Kysely for SQL | Brief mandates Express; Postgres gives DB-level invariants the domain needs; hand-written SQL on hot paths |
+| 1 | Express + TypeScript, Postgres 18, Redis, BullMQ; Kysely query builder, plain SQL migrations | Brief mandates Express; Postgres gives DB-level invariants the domain needs; the builder makes the single pricing expression composable and type-enforced |
 | 2 | "One active promotion per product" enforced by Postgres `EXCLUDE` constraints, not app code | Eliminates the check-then-insert race; concurrent writers serialize on the constraint |
 | 3 | Effective price is **computed at read time**, never stored on products | Flash sale = 1 row insert; auto-inherit is free; satisfies the brief's "instantly" |
 | 4 | Product-scope promotion beats category-scope (precedence rule) | Cross-scope conflicts can't be a DB constraint; precedence resolves them deterministically |
 | 5 | Keyset (cursor) pagination on `(effective_price, id)` | Effective price is computed, so neither scheme can index-skip; keyset is chosen for page stability while a campaign reprices the sort order, and the cursor is bound to its `order` and `category_id` |
-| 6 | Cache-aside Redis on product detail; versioned cache keys per category; single-flight on miss | O(1) invalidation for a 50k-product campaign; no thundering herd on cold cache |
+| 6 | Cache-aside Redis on product detail and listing; versioned cache keys per category; single-flight on miss | O(1) invalidation for a 50k-product campaign; no thundering herd on cold cache |
 | 7 | Ingest = splitter → queue → processors; every invocation bounded and resumable | Serverless timeout/memory constraints; no single invocation depends on file size |
 | 8 | Newest-wins upsert via monotonic `source_seq` | Makes parallel and out-of-order (DLQ replay) processing safe by construction |
 
@@ -26,8 +26,8 @@
 
 ## 1. Context and constraints
 
-Project needs an internal catalog and promotion API with three hard requirements
-that shape the whole design:
+The service provides an internal catalog and promotion API with three hard
+requirements that shape the whole design:
 
 1. **Sorting by effective price with pagination.** Effective price must be
    computable *inside the database query*; computing it in the application
@@ -42,6 +42,12 @@ Non-functional constraints I set for myself: the system must start with
 `docker-compose up` on a reviewer's machine; money must never be represented
 as a float; every invariant that *can* live in the database *does*.
 
+**Money representation.** Prices are strings in TypeScript and `numeric` in
+Postgres; all price arithmetic happens in SQL. The one exception is the ingest
+pricing-rules step (§7), which must compute in the application layer: it uses
+`decimal.js` and converts back to a string before the upsert. No `parseFloat`,
+`Number()`, or float arithmetic touches a price anywhere.
+
 ---
 
 ## 2. Stack
@@ -50,8 +56,13 @@ as a float; every invariant that *can* live in the database *does*.
 primary keys for index locality; `OLD`/`NEW` in `RETURNING` for change
 detection during ingest; richer `EXPLAIN ANALYZE` for the measurements in this
 document), Redis 7, BullMQ,
-Kysely as a type-safe query builder with plain SQL migrations, `csv-parse` for
-streaming, `zod` for validation, `pino` for structured logs, `vitest` for tests.
+Kysely as a type-safe query builder — the effective-price query is built once as
+a composable function that both the listing and detail endpoints extend, which
+makes the "one pricing expression" rule enforceable by the type system rather
+than by discipline — with raw `sql` fragments where the builder cannot express
+something. Migrations are plain SQL. Also `csv-parse` for streaming, `zod` for
+validation, `decimal.js` for ingest pricing arithmetic, `pino` for structured
+logs, `vitest` for tests.
 
 **Why not an ORM (Prisma/TypeORM)?** Two of the most important decisions in this
 document — the `EXCLUDE` constraints (§3) and the lateral-join effective price
@@ -105,6 +116,13 @@ CONSTRAINT no_overlapping_category_promos EXCLUDE USING gist (
 | B. Advisory / row locks around creation | Correct but procedural; a forgotten lock in one code path silently reintroduces the race |
 | **C. Postgres `EXCLUDE` constraints (chosen)** | Impossible to violate from any code path; concurrent inserts serialize on the index; loser gets SQLSTATE `23P01`, mapped to HTTP 409 |
 
+The two partial GiST indexes created by the EXCLUDE constraints double as the
+lookup indexes for the effective-price join in §4: `btree_gist` supports
+equality on `product_id` / `category_id`, and the range condition
+`tstzrange(starts_at, ends_at) @> now()` is an index condition too. The lateral
+join's `OR` on scope resolves to a BitmapOr over them. No separate btree
+indexes are needed; measured at 50k products, adding them changed nothing.
+
 **What the constraints deliberately do not cover:** cross-scope conflict — a
 product-scope and a category-scope promotion both touching the same product.
 This is resolved by the **precedence rule** (§4): product-scope wins. The brief
@@ -155,6 +173,12 @@ Creating "50% off Accessories" is **one row insert**, regardless of whether the
 category has 50 or 50,000 products. A product inserted into the category one
 second later is discounted on its first read with no additional code.
 
+**How products enter the catalog.** Two write paths: the vendor ingest
+pipeline (§7) and a minimal `POST /products` for operational use. The brief
+does not require product CRUD, but Scenario B's "brand new product added while
+the sale is active" needs a way to add one, and having both paths lets the
+auto-inherit test exercise the API path and the ingest path.
+
 ### Options considered
 
 **Option A — Read-time computation (chosen)**
@@ -165,7 +189,7 @@ second later is discounted on its first read with no additional code.
 | Consistency | Transactional; visible in the next query |
 | Auto-inherit | Free (join on category) |
 | Scheduled promotions | Free (`tstzrange @> now()` evaluated per query) |
-| Read cost | Lateral join (cheap — active promos per category ≈ 1–2 rows, indexed) plus a sort over the filtered set — cannot use an index for `ORDER BY effective_price` |
+| Read cost | Lateral join (cheap — active promos per product/category ≈ 1–2 rows, hit via the two partial indexes in §3) plus a sort over the filtered set — cannot use an index for `ORDER BY effective_price` |
 | Complexity | One non-trivial query; one pricing rule in one place |
 
 **Option B — Write-time materialization**
@@ -196,7 +220,7 @@ this implementation, is small:
 - Uncached sorted listing, 50k-product category, p95: `[MEASURE] ms`
 - Same, p99: `[MEASURE] ms`
 
-The interviewer's strongest objection to Option A — "your cache goes cold at
+The strongest objection to Option A — "your cache goes cold at
 the exact moment traffic spikes" — is addressed in §6.
 
 I have operated both patterns in production (a denormalized read model with
@@ -248,18 +272,23 @@ without anyone noticing.
 ## 6. Caching and load distribution
 
 **Product detail (`GET /products/:id`)** — the hottest endpoint. Cache-aside in
-Redis, TTL `[decide, e.g. 300s]`, keyed by
-`product:{id}:v{categoryVersion}`.
+Redis, TTL 300s, keyed by `product:{id}:v{categoryVersion}`.
 
 **Product listing (`GET /products`)** — cached per
-`(category, filters, sort, cursor)` with a short TTL, keyed with the same
-category version.
+`(category, filters, sort, cursor)` with a 60s TTL, keyed with the same
+category version. TTLs only bound staleness from paths that do not bump the
+version; every known write path does, so the TTL is a safety net, not the
+invalidation mechanism.
 
 **Invalidation without a 50k-key delete.** Each category has a version counter
-in Redis (`catver:{categoryId}`). Creating or cancelling a promotion (or
-completing an ingest job that touched the category) increments the counter —
-one `INCR`. Every key containing the old version becomes unreachable and
-expires naturally. Invalidation is O(1) regardless of category size.
+in Redis (`catver:{categoryId}`). Creating or cancelling a promotion, creating
+or updating a product through the API, or completing an ingest job that touched
+the category increments the counter — one `INCR`. Ingest deliberately bumps
+once per affected category at job completion, never per row, and only for
+categories in which at least one price actually changed (§7). Product keys are
+never deleted individually or enumerated (`SCAN`/`KEYS`). Every key containing
+the old version becomes unreachable and expires naturally. Invalidation is
+O(1) regardless of category size.
 
 **Stampede protection.** A version bump makes every cached page of that
 category cold at once — by design, at the moment a flash sale starts and
@@ -269,9 +298,12 @@ traffic peaks. Two mitigations:
    query while concurrent requests for the same key await its result
    (in-process promise map; a short Redis `SET NX` lock across instances).
    The herd becomes one query.
-2. **Warm the first pages.** After a promotion is created, synchronously warm
-   the first N pages of the affected category's default sort. Option A makes
-   the write path cheap enough to spend the budget here.
+2. **Warm the first pages — deferred pending the measurements below.** If the
+   "cold cache with single-flight" p99 is acceptable, warming is unnecessary
+   complexity on the write path. If it is not, warming the first two pages of
+   the affected category's default sort after a promotion write is the first
+   thing to add; it is about twenty lines, and Option A makes the write path
+   cheap enough to spend the budget there.
 
 Measured under simulated flash sale (k6/autocannon, `scripts/load/`):
 
@@ -293,7 +325,7 @@ POST /ingest/jobs ──▶ ingest_jobs (202)
                         │
                         ▼
                    [Splitter]  stream CSV → chunks/{job}/{i}.jsonl → enqueue {job, i}
-                        │      checkpoints (byte_offset, next_chunk); re-enqueues itself
+                        │      checkpoints next_chunk_index; re-enqueues itself
                         │      when remaining time is low
                         ▼
                      [Queue]   BullMQ locally · SQS + redrive policy in production
@@ -305,19 +337,31 @@ POST /ingest/jobs ──▶ ingest_jobs (202)
 
 The HTTP process never touches row data.
 
+### The pricing rules step
+
+The brief requires that vendor data pass through internal dynamic pricing rules
+before being saved. In this implementation (`src/ingest/pricing-rules.ts`) the
+rules are: base price = vendor cost × (1 + margin), with the margin configurable
+per category and a global floor; rounding to the category's price-ending rule
+(e.g. `.99`); rows priced below vendor cost after rounding are rejected as row
+errors. The rules are pure functions over one row, unit-tested in isolation,
+and computed with `decimal.js`. They are the reason ingest cannot be a
+`COPY` into the products table.
+
 ### Failure modes and how each is handled
 
 | Failure | Handling |
 |---------|----------|
-| Splitter times out or crashes mid-file | Checkpoint `(byte_offset, next_chunk_index)` persisted every N chunks; deterministic chunk filenames make rewrites idempotent; splitter checks remaining time and re-enqueues itself before the limit — any invocation is bounded |
-| Chunk processed twice (splitter retry re-enqueues) | `ingest_chunks (job_id, chunk_index)` PK; processor's first statement is `UPDATE ... SET status='PROCESSING' WHERE status='PENDING'`; zero rows → already handled, exit |
+| Splitter times out or crashes mid-file | Checkpoint `next_chunk_index` persisted every N chunks; on resume the splitter streams from the start of the file and skips `next_chunk_index × CHUNK_SIZE` records through the parser (byte offsets are not safe resume points in CSV: they can land inside a multi-byte character or a quoted field); deterministic chunk filenames make rewrites idempotent; splitter checks remaining time and re-enqueues itself before the limit — any invocation is bounded and a retry costs at most one re-read of the file |
+| Chunk processed twice (splitter retry re-enqueues) | `ingest_chunks (job_id, chunk_index)` PK; processor's first statement is `UPDATE ... SET status='PROCESSING', attempts = attempts + 1 WHERE status IN ('PENDING','FAILED')`; zero rows → already handled, exit |
+| Processor crashes mid-chunk, leaving the row `PROCESSING` | On any thrown error the processor sets `status='FAILED'` in a separate statement outside the failed transaction, then rethrows so the queue retry can reclaim. For hard crashes where even that does not run, `POST /ingest/jobs/:id/replay-failed` also re-enqueues `PROCESSING` rows whose `updated_at` is older than the invocation timeout; the processor's claim statement makes a double replay harmless |
 | Completion detected too early (processors finish before splitter sets total) | No counter. Job is complete when splitter status is `SPLIT_DONE` **and** no chunk is non-DONE; checked by whichever finishes last |
 | Same SKU appears twice in one file, chunks land out of order, or a DLQ'd chunk is replayed later | Monotonic `source_seq = (job_seq << 32) \| row_no` on every row; `ON CONFLICT (sku) DO UPDATE ... WHERE EXCLUDED.source_seq > products.source_seq`. Newest wins in any order; an old job's replay can never overwrite a newer job's data |
 | Concurrent multi-row upserts deadlock | Every batch is `ORDER BY sku` before upsert — deterministic lock order |
 | One malformed row poisons a 1,000-row chunk | Validate first; partition valid/invalid; upsert valid; record invalid in `ingest_row_errors`. Row errors are data, not exceptions |
 | Two processors create the same new category | `INSERT ... ON CONFLICT (name) DO NOTHING` then select |
 | 500 chunks fan out to 500 DB connections | The queue is the throttle: worker concurrency cap locally; reserved concurrency + RDS Proxy/PgBouncer in production |
-| Stale cache after prices change | `RETURNING sku` from the upsert filtered to rows whose price actually changed; invalidate in pipelined batches; bump category versions on job completion |
+| Stale cache after prices change | `RETURNING category_id, OLD.base_price IS DISTINCT FROM NEW.base_price` (Postgres 18) from the upsert tells the processor which categories had a real price change; those categories are bumped once each at job completion. No per-row or per-SKU cache writes |
 | Vendor re-uploads the same file | `UNIQUE (vendor_id, file_checksum)`; re-POST returns the existing job |
 | Float precision | Prices parsed as strings into `numeric`; no `parseFloat` anywhere in the pipeline |
 
@@ -348,8 +392,8 @@ Measured (`scripts/ingest/generate.ts`, 500,000 rows):
 pricing logic lives in one query; every invariant is database-enforced;
 ingestion scales with file size without code changes.
 
-**Harder:** the listing query is non-trivial SQL that must be maintained by
-hand; the sort cannot use an index, so caching is load-bearing for the
+**Harder:** the effective-price query is non-trivial and must be understood to
+be maintained; the sort cannot use an index, so caching is load-bearing for the
 storefront; keyset cursors over a computed value need care.
 
 **Revisit when:** a single category exceeds a few hundred thousand products

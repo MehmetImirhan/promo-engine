@@ -24,6 +24,7 @@ export interface ProductView {
   name: string;
   category_id: string;
   base_price: string;
+  stock_quantity: number;
   effective_price: string;
   /** The promotion that produced effective_price, or null when it equals base_price. */
   promotion: AppliedPromotion | null;
@@ -56,6 +57,7 @@ export function toProductView(row: PricedProduct): ProductView {
     name: row.name,
     category_id: row.category_id,
     base_price: row.base_price,
+    stock_quantity: row.stock_quantity,
     effective_price: row.effective_price,
     promotion,
     created_at: row.created_at,

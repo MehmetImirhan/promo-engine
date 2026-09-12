@@ -42,6 +42,7 @@ export interface ProductsTable {
   name: string;
   category_id: string;
   base_price: Money;
+  stock_quantity: Generated<number>;
   /** (job_seq << 32) | row_no; 0 = never written by ingest. */
   source_seq: ColumnType<string, string | bigint | undefined, string | bigint>;
   created_at: GeneratedTimestamp;
@@ -74,7 +75,7 @@ export interface IngestJobsTable {
   file_checksum: string;
   file_key: string;
   status: Generated<IngestJobStatus>;
-  byte_offset: ColumnType<string, string | bigint | undefined, string | bigint>;
+  /** Splitter checkpoint: chunks [0, next_chunk_index) are written and enqueued. */
   next_chunk_index: Generated<number>;
   error: string | null;
   created_at: GeneratedTimestamp;

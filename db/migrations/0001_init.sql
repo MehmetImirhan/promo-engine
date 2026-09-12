@@ -22,6 +22,7 @@ CREATE TABLE products (
   name        text          NOT NULL,
   category_id uuid          NOT NULL REFERENCES categories (id),
   base_price  numeric(12,2) NOT NULL,
+  stock_quantity integer    NOT NULL DEFAULT 0,
   -- Ingest ordering key: (job_seq << 32) | row_no of the row that last wrote
   -- this product. 0 means "never written by ingest". The upsert only applies
   -- when EXCLUDED.source_seq > products.source_seq (newest wins, any order).
@@ -29,8 +30,9 @@ CREATE TABLE products (
   created_at  timestamptz   NOT NULL DEFAULT now(),
   updated_at  timestamptz   NOT NULL DEFAULT now(),
 
-  CONSTRAINT products_sku_key                UNIQUE (sku),
-  CONSTRAINT products_base_price_nonnegative CHECK (base_price >= 0)
+  CONSTRAINT products_sku_key                    UNIQUE (sku),
+  CONSTRAINT products_base_price_nonnegative     CHECK (base_price >= 0),
+  CONSTRAINT products_stock_quantity_nonnegative CHECK (stock_quantity >= 0)
 );
 
 CREATE INDEX products_category_id_idx ON products (category_id);
@@ -90,8 +92,9 @@ CREATE TABLE ingest_jobs (
   -- Key in the Storage abstraction (local path now, S3 key in production).
   file_key         text        NOT NULL,
   status           text        NOT NULL DEFAULT 'PENDING',
-  -- Splitter checkpoint: resume streaming from here on retry.
-  byte_offset      bigint      NOT NULL DEFAULT 0,
+  -- Splitter checkpoint. On retry the splitter re-streams the file and skips
+  -- next_chunk_index * CHUNK_SIZE records through the parser. Byte offsets are
+  -- deliberately not stored: they are not safe resume points in CSV.
   next_chunk_index integer     NOT NULL DEFAULT 0,
   error            text,
   created_at       timestamptz NOT NULL DEFAULT now(),

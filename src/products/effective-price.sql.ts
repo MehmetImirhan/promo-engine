@@ -87,6 +87,7 @@ export function pricedProducts(db: Db) {
       'p.name',
       'p.category_id',
       'p.base_price',
+      'p.stock_quantity',
       'p.created_at',
       'p.updated_at',
       sql<string>`COALESCE(promo.discounted_price, p.base_price)`.as('effective_price'),
