@@ -295,9 +295,11 @@ category cold at once — by design, at the moment a flash sale starts and
 traffic peaks. Two mitigations:
 
 1. **Single-flight / request coalescing.** On a cache miss, one request runs the
-   query while concurrent requests for the same key await its result
-   (in-process promise map; a short Redis `SET NX` lock across instances).
-   The herd becomes one query.
+   query while concurrent requests for the same key await its result via an
+   in-process promise map, so the herd becomes one query per replica. Across
+   instances that is still one query each; a short Redis `SET NX`
+   lock would reduce that to one in total and is a follow-up if the
+   measurements show per-replica coalescing is insufficient.
 2. **Warm the first pages — deferred pending the measurements below.** If the
    "cold cache with single-flight" p99 is acceptable, warming is unnecessary
    complexity on the write path. If it is not, warming the first two pages of
