@@ -1,11 +1,11 @@
 # Architecture Decision Record — Promotion Management API
 
-**Status:** Draft — to be finalized after implementation and measurement
+**Status:** Measured — every `[MEASURE]` placeholder has been replaced with a number from `scripts/`
 **Author:** Mehmet İmirhan
 **Date:** September 2026
 
-> Sections marked `[MEASURE]` are placeholders for numbers produced by the load
-> and ingest scripts in `scripts/`. Do not ship the ADR with placeholders.
+> Numbers in §4, §6 and §7 come from `scripts/load/run.ts` and
+> `scripts/ingest/measure.sh`; the environment is stated next to each set.
 
 ---
 
@@ -215,10 +215,30 @@ Option B optimizes the read path at the cost of correctness windows, a
 scheduler, distributed pricing logic, and write amplification. Option A keeps
 one source of truth and one pricing rule, and pays for it with a sort that
 cannot use an index. That cost is bounded by category size and, measured on
-this implementation, is small:
+this implementation (`scripts/load/run.ts`, cache bypassed, 50 timed runs of
+the first page, 50,000-product category inside a 537k-row `products` table,
+Postgres in Docker on an Apple Silicon laptop carrying a load average of ~9
+from other applications; median of six runs):
 
-- Uncached sorted listing, 50k-product category, p95: `[MEASURE] ms`
-- Same, p99: `[MEASURE] ms`
+- Uncached sorted listing, 50k-product category, p95: 147 ms
+- Same, p99: 153 ms (p50: 138 ms)
+
+`EXPLAIN (ANALYZE, BUFFERS)` shows where it goes: a scan of the category
+(~88 ms as a seq scan over the 537k-row table; forcing the category index
+saves ~15 ms, not worth overriding the planner), 50,000 lateral probes into
+the two partial GiST indexes (~110 ms, every buffer a cache hit), and a
+top-N heapsort for the page (27 kB). Two findings from measuring rather than
+reasoning:
+
+- **Postgres JIT was doubling it.** Once autoanalyze had accurate row counts
+  for the category, the plan's estimated cost crossed `jit_above_cost` and
+  every execution paid ~140 ms of LLVM inlining, optimization and emission
+  on top of ~145 ms of execution — JIT work is not cached across statements.
+  The pool now sends `-c jit=off` as a libpq startup option; this service
+  runs nothing that benefits from JIT.
+- The per-product lateral probe, not the sort, is the dominant term. That is
+  what "revisit when a category exceeds a few hundred thousand products"
+  in §8 refers to.
 
 The strongest objection to Option A — "your cache goes cold at
 the exact moment traffic spikes" — is addressed in §6.
@@ -290,28 +310,77 @@ never deleted individually or enumerated (`SCAN`/`KEYS`). Every key containing
 the old version becomes unreachable and expires naturally. Invalidation is
 O(1) regardless of category size.
 
+**Two details the key scheme needed that the sketch above does not show.**
+The detail request carries only a product id, so the category whose version
+the key embeds is not known up front; the product → category mapping is
+cached beside the detail entry (24 h, refreshed on every miss, corrected
+when a fresh read disagrees with it). And the version token is
+category-qualified (`{categoryId}.{n}`), because per-category counters
+collide numerically and a product that ingest moved from one category to
+another must not find a stale key written under the other category's
+identical number. For the same reason the ingest upsert reports a row's
+previous category, and a move bumps both. The unfiltered listing keys on
+`catver:_all`, incremented alongside every category bump.
+
+**Fail-open, including the version read.** Every Redis touch — version
+read, GET, SET, INCR — is caught; the request is served from Postgres and
+the outage is logged once per transition, not per request. Single-flight
+still applies while Redis is down, so a Redis outage during a sale does not
+become a Postgres stampede. Redis is a latency optimization, never a
+dependency for correctness.
+
 **Stampede protection.** A version bump makes every cached page of that
 category cold at once — by design, at the moment a flash sale starts and
-traffic peaks. Two mitigations:
+traffic peaks. Two mitigations were considered:
 
 1. **Single-flight / request coalescing.** On a cache miss, one request runs the
    query while concurrent requests for the same key await its result via an
    in-process promise map, so the herd becomes one query per replica. Across
    instances that is still one query each; a short Redis `SET NX`
-   lock would reduce that to one in total and is a follow-up if the
-   measurements show per-replica coalescing is insufficient.
-2. **Warm the first pages — deferred pending the measurements below.** If the
-   "cold cache with single-flight" p99 is acceptable, warming is unnecessary
-   complexity on the write path. If it is not, warming the first two pages of
-   the affected category's default sort after a promotion write is the first
-   thing to add; it is about twenty lines, and Option A makes the write path
-   cheap enough to spend the budget there.
+   lock would reduce that to one in total. **Deferred:** the measurements
+   below show per-replica coalescing holds the cold-window p99 within a few
+   milliseconds of the warm one; the cross-instance lock is the first thing
+   to add if a multi-replica deployment measures otherwise.
+2. **Warm the first pages after a promotion write.** **Deferred, with the
+   number as the justification:** the cold-cache listing p99 with
+   single-flight (13.8 ms) is indistinguishable from the warm p99 (11.0 ms).
+   Warming would add code to the write path to save one query per page per
+   replica. If a deployment measures a cold p99 that matters, warming the
+   first two pages of the affected category's default sort is about twenty
+   lines.
 
-Measured under simulated flash sale (k6/autocannon, `scripts/load/`):
+Measured under simulated flash sale (`scripts/load/run.ts`, autocannon:
+32 connections walking pages 1–3 of the 50k-product category by cursor plus
+32 connections reading a 2,000-product hot set, promotion created mid-run;
+same laptop and background load as §4; median of three alternating runs per
+configuration, cold window = the 10 s after the bump):
 
-- Listing p99 with warm cache: `[MEASURE] ms`
-- Listing p99 during version bump with single-flight: `[MEASURE] ms`
-- Listing p99 during version bump *without* single-flight (for comparison): `[MEASURE] ms`
+- Listing p99 with warm cache: 11.0 ms
+- Listing p99 during version bump with single-flight: 13.8 ms
+- Listing p99 during version bump *without* single-flight (for comparison): 21.1 ms
+
+The p99 line understates the comparison, because the listing herd is only
+three keys. The full picture per window:
+
+| | with single-flight | without |
+|---|---|---|
+| Listing req/s, warm → cold window | 5,129 → 4,250 | 2,620 → 1,201 |
+| Listing max latency, cold window | 472 ms | 3,916 ms |
+| Detail p99, warm → cold window | 14.0 → 20.3 ms | 57.4 → 2,137 ms |
+| Detail req/s, cold window | 3,570 | 297 |
+
+Without coalescing the 2,000 hot detail keys go cold together and every
+duplicate miss becomes its own query; the 10-connection pool saturates and
+the backlog, not the query time, sets the tail. Even the "warm" window of
+the no-coalescing runs is degraded — its throughput is half and its max
+latency 3 s — because the process-start herd had not drained through the
+pool within the 3 s warm-up. With coalescing the same bump costs one query
+per key per replica and is invisible at p99.
+
+**Detail endpoint cost.** A warm detail hit is three sequential Redis round
+trips (mapping, version, entry), which is why its p99 sits ~3 ms above the
+listing's. Folding them into one Lua script is the follow-up if that ever
+matters; at these numbers it does not.
 
 ---
 
@@ -423,8 +492,10 @@ pricing logic lives in one query; every invariant is database-enforced;
 ingestion scales with file size without code changes.
 
 **Harder:** the effective-price query is non-trivial and must be understood to
-be maintained; the sort cannot use an index, so caching is load-bearing for the
-storefront; keyset cursors over a computed value need care.
+be maintained; the per-product promotion probe and the sort cannot use an
+index for the order, so caching is load-bearing for the storefront (~150 ms
+uncached vs ~11 ms cached at p99, §4/§6); keyset cursors over a computed
+value need care; the detail cache needs a product → category mapping.
 
 **Revisit when:** a single category exceeds a few hundred thousand products
 (sort cost grows; consider a partial materialized sort key refreshed by the

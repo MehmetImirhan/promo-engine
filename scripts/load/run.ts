@@ -365,7 +365,8 @@ async function main(): Promise<void> {
       console.log(summary.join('\n'));
 
       await mkdir('data/load', { recursive: true });
-      const out = `data/load/result-single-flight-${singleFlight ? 'on' : 'off'}.json`;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const out = `data/load/${stamp}-single-flight-${singleFlight ? 'on' : 'off'}.json`;
       await writeFile(
         out,
         JSON.stringify({ args, count, uncached, tPromo: run.tPromo, listing: listingWindows, detail: detailWindows, summary }, null, 2),
