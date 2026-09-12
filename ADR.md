@@ -17,7 +17,7 @@
 | 2 | "One active promotion per product" enforced by Postgres `EXCLUDE` constraints, not app code | Eliminates the check-then-insert race; concurrent writers serialize on the constraint |
 | 3 | Effective price is **computed at read time**, never stored on products | Flash sale = 1 row insert; auto-inherit is free; satisfies the brief's "instantly" |
 | 4 | Product-scope promotion beats category-scope (precedence rule) | Cross-scope conflicts can't be a DB constraint; precedence resolves them deterministically |
-| 5 | Keyset (cursor) pagination on `(effective_price, id)` | Offset pagination degrades linearly and drifts under concurrent writes |
+| 5 | Keyset (cursor) pagination on `(effective_price, id)` | Effective price is computed, so neither scheme can index-skip; keyset is chosen for page stability while a campaign reprices the sort order, and the cursor is bound to its `order` and `category_id` |
 | 6 | Cache-aside Redis on product detail; versioned cache keys per category; single-flight on miss | O(1) invalidation for a 50k-product campaign; no thundering herd on cold cache |
 | 7 | Ingest = splitter → queue → processors; every invocation bounded and resumable | Serverless timeout/memory constraints; no single invocation depends on file size |
 | 8 | Newest-wins upsert via monotonic `source_seq` | Makes parallel and out-of-order (DLQ replay) processing safe by construction |
@@ -209,17 +209,39 @@ in one query.
 
 ## 5. Pagination
 
-**Decision:** keyset pagination with an opaque cursor encoding
-`(effective_price, id)`; `id` is the tiebreaker so the order is total.
+**Decision:** keyset pagination with an opaque cursor encoding the sort key
+`(effective_price, id)` plus the listing scope `(order, category_id)`; `id`
+is the tiebreaker so the order is total.
 
-Offset pagination over a computed sort key degrades linearly (`OFFSET 10000`
-still computes and sorts 10,000 rows) and drifts when products are inserted or
-promotions change between pages. Keyset pagination over a computed value is
-slightly subtle — the cursor must carry the computed value, and the `WHERE`
-must be `(effective_price, id) > ($cursor_price, $cursor_id)` — but it is
-stable and O(page).
+**Why keyset — and why not for the usual reason.** The textbook case for
+keyset is that `WHERE (sort_key, id) > ($k, $id)` can use an index and skip
+straight to the page boundary. That does not apply here: `effective_price`
+is computed per row by the lateral join (§4), so no index exists to skip
+into, and both keyset and offset evaluate the pricing expression for every
+product in the filtered set before sorting. The cost difference is only the
+offset discard — marginal.
 
-Trade-off: no "jump to page N". Acceptable for a storefront listing.
+The argument that does apply is **page stability under concurrent writes.**
+The listing is the storefront during flash sales, and a campaign reprices
+thousands of products in the sort order at once. Offset counts positions,
+and positions move: a product can be skipped or repeated across pages when
+the ordering changes between requests. A keyset cursor is a fact about the
+last row seen, not a position, so rows that move elsewhere in the ordering
+cannot shift the page. Only a product whose own effective price crosses the
+boundary mid-walk can be missed or repeated, and no stateless pagination
+avoids that without a snapshot. Secondary benefit: cursors are cleaner
+cache keys than page numbers under the versioned-key scheme in §6.
+
+**Cursor contract.** The cursor also carries the `order` and `category_id`
+that produced it. A cursor sent back with a different `order` or
+`category_id` returns `400` rather than silently returning a valid page of a
+different listing. `limit` is not bound to the cursor and may change between
+pages.
+Cursors are opaque tokens precisely so the server can enforce this; a
+contract that lives only in documentation is one a client bug will break
+without anyone noticing.
+
+**Trade-off:** no "jump to page N". Acceptable for a storefront listing.
 
 ---
 

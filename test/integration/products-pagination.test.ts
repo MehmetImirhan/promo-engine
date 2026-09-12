@@ -132,6 +132,23 @@ describe('GET /products keyset pagination', () => {
     expect(paged.body.next_cursor).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
+  it('rejects a cursor replayed with a different order or category with 400', async () => {
+    const first = await app.get<ProductPage>(`/products?category_id=${categoryId}&order=asc&limit=${PAGE_SIZE}`);
+    const cursor = first.body.next_cursor!;
+
+    const flipped = await app.get<ErrorBody>(`/products?category_id=${categoryId}&order=desc&limit=${PAGE_SIZE}&cursor=${cursor}`);
+    expect(flipped.status).toBe(400);
+    expect(flipped.body.error.message).toMatch(/does not belong/);
+
+    const unfiltered = await app.get<ErrorBody>(`/products?order=asc&limit=${PAGE_SIZE}&cursor=${cursor}`);
+    expect(unfiltered.status).toBe(400);
+
+    // Same listing still works.
+    const same = await app.get<ProductPage>(`/products?category_id=${categoryId}&order=asc&limit=${PAGE_SIZE}&cursor=${cursor}`);
+    expect(same.status).toBe(200);
+    expect(same.body.items).toHaveLength(PAGE_SIZE);
+  });
+
   it('rejects a malformed cursor with 400', async () => {
     const res = await app.get<ErrorBody>(`/products?category_id=${categoryId}&cursor=not-a-cursor`);
     expect(res.status).toBe(400);

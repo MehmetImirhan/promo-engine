@@ -6,10 +6,10 @@
 import { sql } from 'kysely';
 import type { Db, DiscountType } from '../db/index.js';
 import { NotFound } from '../shared/errors.js';
-import { decodeCursor, encodeCursor } from './cursor.js';
+import { decodeCursor, encodeCursor, type CursorScope, type SortOrder } from './cursor.js';
 import { pricedProducts, type PricedProduct } from './effective-price.sql.js';
 
-export type SortOrder = 'asc' | 'desc';
+export type { SortOrder };
 
 export interface AppliedPromotion {
   id: string;
@@ -40,7 +40,7 @@ export interface ListProductsParams {
 
 export interface ProductPage {
   items: ProductView[];
-  /** Pass back as `cursor` with the same category_id and order to get the next page; null on the last page. */
+  /** Pass back as `cursor` with the same category_id and order to get the next page; null on the last page. A cursor sent with a different order or category_id is rejected with 400. */
   next_cursor: string | null;
 }
 
@@ -79,6 +79,7 @@ export function createProductsService(db: Db) {
      * so the category filter still applies before the lateral join.
      */
     async listProducts({ category_id, order, limit, cursor }: ListProductsParams): Promise<ProductPage> {
+      const scope: CursorScope = { order, categoryId: category_id ?? null };
       let query = db.selectFrom(pricedProducts(db).as('t')).selectAll('t');
 
       if (category_id !== undefined) {
@@ -86,7 +87,7 @@ export function createProductsService(db: Db) {
       }
 
       if (cursor !== undefined) {
-        const key = decodeCursor(cursor);
+        const key = decodeCursor(cursor, scope);
         // Row-value comparison over the full sort key; `id` makes the order total.
         // Ascending pages continue past the key, descending pages continue before it.
         query =
@@ -108,7 +109,7 @@ export function createProductsService(db: Db) {
 
       return {
         items: page.map(toProductView),
-        next_cursor: hasMore && last ? encodeCursor({ effectivePrice: last.effective_price, id: last.id }) : null,
+        next_cursor: hasMore && last ? encodeCursor({ effectivePrice: last.effective_price, id: last.id }, scope) : null,
       };
     },
   };

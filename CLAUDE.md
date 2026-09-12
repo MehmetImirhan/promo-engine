@@ -67,7 +67,9 @@ silently implement something different.
 - Listing sorts by `effective_price` **in SQL**, never in application code.
 
 ### Pagination
-- Keyset only. Cursor is an opaque base64 of `(effective_price, id)`.
+- Keyset only. Cursor is an opaque base64 of the sort key `(effective_price,
+  id)` plus the listing scope `(order, category_id)`; a cursor replayed with
+  a different `order` or `category_id` is a 400.
   `WHERE (effective_price, id) > ($price, $id)`; `id` is the tiebreaker.
   No `OFFSET`.
 
