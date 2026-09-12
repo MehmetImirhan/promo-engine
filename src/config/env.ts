@@ -36,6 +36,12 @@ const envSchema = z.object({
   INGEST_INVOCATION_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(60_000),
   /** The splitter re-enqueues itself when less than this much of the invocation remains. */
   INGEST_SPLIT_RESERVE_MS: z.coerce.number().int().min(100).default(2_000),
+
+  // --- caching (ADR §6) ---
+  /** Kill switch: false serves every read straight from Postgres and skips version reads and bumps. */
+  CACHE_ENABLED: z.stringbool().default(true),
+  /** In-process coalescing of concurrent cache misses; false exists only for the comparison measurement. */
+  CACHE_SINGLE_FLIGHT: z.stringbool().default(true),
 }).refine((e) => e.INGEST_SPLIT_RESERVE_MS < e.INGEST_INVOCATION_TIMEOUT_MS, {
   path: ['INGEST_SPLIT_RESERVE_MS'],
   message: 'must be smaller than INGEST_INVOCATION_TIMEOUT_MS',
