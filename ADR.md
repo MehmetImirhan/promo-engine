@@ -1,4 +1,4 @@
-# Architecture Decision Record — ModaCo Promotion Management API
+# Architecture Decision Record — Promotion Management API
 
 **Status:** Draft — to be finalized after implementation and measurement
 **Author:** Mehmet İmirhan
@@ -26,7 +26,7 @@
 
 ## 1. Context and constraints
 
-ModaCo needs an internal catalog and promotion API with three hard requirements
+Project needs an internal catalog and promotion API with three hard requirements
 that shape the whole design:
 
 1. **Sorting by effective price with pagination.** Effective price must be

@@ -1,4 +1,4 @@
-# CLAUDE.md — ModaCo Promotion Management API
+# CLAUDE.md — Promotion Management API
 
 You are implementing a design that has already been decided. The architecture
 is in `ADR.md`; read it before any non-trivial task. Your job is to implement
