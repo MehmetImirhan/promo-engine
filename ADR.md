@@ -381,12 +381,38 @@ and computed with `decimal.js`. They are the reason ingest cannot be a
 
 The pipeline code is identical in both modes; only the adapters differ.
 
-Measured (`scripts/ingest/generate.ts`, 500,000 rows):
+Measured (`scripts/ingest/measure.sh`: 500,000 generated rows, 24.4 MB,
+2,575 malformed rows, chunk size 1,000, worker concurrency 4, API and both
+workers under `node --max-old-space-size=128`, Apple Silicon laptop, Postgres
+and Redis in Docker):
 
-- Wall time end-to-end: `[MEASURE]`
-- Peak RSS of splitter: `[MEASURE] MB`
-- Peak RSS of a processor invocation: `[MEASURE] MB`
-- Rows/sec sustained: `[MEASURE]`
+| | normal timeout (60 s) | forced continuations (1.5 s timeout) |
+|---|---|---|
+| Wall time, upload accepted → `COMPLETED` | 27.0 s | 93.4 s |
+| Rows/sec sustained | 18,500 | 5,360 |
+| Splitter invocations | 1 | 74 (73 continuations) |
+| Chunks: expected / written / processed twice | 500 / 500 / 0 | 500 / 500 / 0 |
+| Peak RSS: API during upload | 120 MB | 123 MB |
+| Peak RSS: splitter | 159 MB | 162 MB |
+| Peak RSS: chunk worker (4 concurrent chunks) | 195 MB | 196 MB |
+
+The RSS figures include native memory (V8 code, pg and Redis client
+buffers); the 128 MB flag caps the JS heap, and no process approached it.
+Memory did not move between the two runs or with file size — it is a
+function of chunk size and concurrency only.
+
+The forced-continuation run is the cost of the record-skip resume made
+visible: each continuation re-parses everything before its checkpoint, so
+chunks written per invocation fell from 93 in the first invocation to 1 in
+the last, and the split phase dominated the wall time while processing kept
+pace. At any realistic function timeout (minutes) a 500k-row file splits in
+one invocation; the measurement exists to prove the continuation path is
+correct (zero duplicate chunks, byte-identical chunk files in the test
+suite), not to run there. Should files grow to the point where the skip
+phase itself approaches the timeout, the checkpoint would switch to the
+byte offset of the last record boundary the parser reported — which is
+safe, unlike an arbitrary offset — at the cost of storing the header
+columns on the job.
 
 ---
 
