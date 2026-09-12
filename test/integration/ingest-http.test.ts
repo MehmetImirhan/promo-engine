@@ -35,11 +35,11 @@ beforeAll(async () => {
   app = await startTestApp();
   const fx = app.ingest;
   splitter = new Splitter(
-    { db: app.db, storage: fx.storage, splitQueue: fx.splitQueue, chunkQueue: fx.chunkQueue, logger },
+    { db: app.db, storage: fx.storage, splitQueue: fx.splitQueue, chunkQueue: fx.chunkQueue, logger, invalidation: fx.invalidation },
     { chunkSize: 4, reserveMs: 1_000, maxAttempts: env.INGEST_MAX_ATTEMPTS },
   );
   processor = new ChunkProcessor(
-    { db: app.db, storage: fx.storage, logger },
+    { db: app.db, storage: fx.storage, logger, invalidation: fx.invalidation },
     { maxAttempts: env.INGEST_MAX_ATTEMPTS, staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS },
   );
 });

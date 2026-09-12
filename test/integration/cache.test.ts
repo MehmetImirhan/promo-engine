@@ -8,7 +8,14 @@
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { env } from '../../src/config/index.js';
+import type { InvocationContext } from '../../src/ingest/context.js';
+import { priceRow } from '../../src/ingest/pricing-rules.js';
+import { ChunkProcessor } from '../../src/ingest/processor.js';
+import type { JobStatusView } from '../../src/ingest/service.js';
+import { Splitter } from '../../src/ingest/splitter.js';
 import type { ProductPage, ProductView } from '../../src/products/service.js';
+import { createLogger } from '../../src/shared/logger.js';
 import { startTestApp, type TestApp } from '../helpers/app.js';
 
 let app: TestApp;
@@ -197,6 +204,97 @@ describe('(b)(c)(d) promotion writes invalidate by version bump', () => {
     expect(Number(await version(other))).toBe(Number(vOther ?? '0') + 1);
     expect((await app.get<ProductView>(`/products/${p1}`)).body.effective_price).toBe('20.00');
     expect((await app.get<ProductView>(`/products/${p2}`)).body.effective_price).toBe('3.00');
+  });
+});
+
+describe('(c) ingest path: job completion bumps each touched category once', () => {
+  const ctx: InvocationContext = { remainingTimeMs: () => 60_000 };
+  const logger = createLogger({ level: 'silent', pretty: false });
+  let splitter: Splitter;
+  let processor: ChunkProcessor;
+  let catName: string;
+  let cat: string;
+  let sku: string;
+
+  async function ingest(csv: string): Promise<JobStatusView> {
+    const created = await app.upload<{ id: string }>('/ingest/jobs', {
+      fields: { vendor_id: `vendor-${randomUUID()}` },
+      file: { name: 'v.csv', content: csv },
+    });
+    expect(created.status).toBe(202);
+    await app.ingest.splitQueue.drain((d) => splitter.handle(d.payload, ctx));
+    await app.ingest.chunkQueue.drain((d) => processor.handle(d.payload, ctx));
+    const status = await app.get<JobStatusView>(`/ingest/jobs/${created.body.id}`);
+    expect(status.body.status).toBe('COMPLETED');
+    return status.body;
+  }
+
+  beforeAll(async () => {
+    const fx = app.ingest;
+    splitter = new Splitter(
+      { db: app.db, storage: fx.storage, splitQueue: fx.splitQueue, chunkQueue: fx.chunkQueue, logger, invalidation: fx.invalidation },
+      { chunkSize: 2, reserveMs: 1_000, maxAttempts: env.INGEST_MAX_ATTEMPTS },
+    );
+    processor = new ChunkProcessor(
+      { db: app.db, storage: fx.storage, logger, invalidation: fx.invalidation },
+      { maxAttempts: env.INGEST_MAX_ATTEMPTS, staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS },
+    );
+    catName = `cache-ingest-${randomUUID()}`;
+    cat = (await app.pool.query<{ id: string }>('INSERT INTO categories (name) VALUES ($1) RETURNING id', [catName]))
+      .rows[0]!.id;
+    sku = `CACHE-ING-${randomUUID()}`;
+  });
+
+  it('a product ingested into a category on sale is discounted on first read, and the cached listing sees it', async () => {
+    const promo = await app.post('/promotions', {
+      name: 'ingest sale',
+      category_id: cat,
+      discount_type: 'PERCENTAGE',
+      value: '50',
+      ...window(),
+    });
+    expect(promo.status).toBe(201);
+    const emptyPage = await app.get<ProductPage>(`/products?category_id=${cat}`);
+    expect(emptyPage.body.items).toEqual([]);
+    const v = Number(await version(cat));
+
+    // Five rows across three chunks: one bump for the category, not five, not three.
+    const rows = Array.from({ length: 5 }, (_, i) => `${i === 0 ? sku : `${sku}-${i}`},Row ${i},${catName},${10 + i}.00,1`);
+    const status = await ingest(['sku,name,category,cost,stock_quantity', ...rows].join('\n') + '\n');
+    expect(status.chunks.DONE).toBe(3);
+    expect(Number(await version(cat))).toBe(v + 1);
+
+    const base = priceRow({ cost: '10.00', category: catName });
+    expect(base.ok).toBe(true);
+    const basePrice = (base as { base_price: string }).base_price;
+    const page = await app.get<ProductPage>(`/products?category_id=${cat}`);
+    expect(page.body.items).toHaveLength(5);
+    const first = page.body.items.find((p) => p.sku === sku)!;
+    expect(first.base_price).toBe(basePrice);
+    expect(first.effective_price).not.toBe(basePrice);
+    expect(first.promotion?.name).toBe('ingest sale');
+    expect((await app.get<ProductView>(`/products/${first.id}`)).body.effective_price).toBe(first.effective_price);
+  });
+
+  it('a re-ingest with no price change bumps nothing; moving a product to another category bumps both', async () => {
+    const v = Number(await version(cat));
+    await ingest(`sku,name,category,cost,stock_quantity\n${sku},Renamed,${catName},10.00,7\n`);
+    expect(Number(await version(cat))).toBe(v);
+
+    const otherName = `cache-ingest-${randomUUID()}`;
+    await ingest(`sku,name,category,cost,stock_quantity\n${sku},Moved,${otherName},10.00,7\n`);
+    const other = (await app.db.selectFrom('categories').select('id').where('name', '=', otherName).executeTakeFirstOrThrow()).id;
+    expect(Number(await version(cat))).toBe(v + 1);
+    expect(await version(other)).toBe('1');
+
+    const oldPage = await app.get<ProductPage>(`/products?category_id=${cat}`);
+    expect(oldPage.body.items.map((p) => p.sku)).not.toContain(sku);
+    const moved = await app.db.selectFrom('products').select('id').where('sku', '=', sku).executeTakeFirstOrThrow();
+    const detail = await app.get<ProductView>(`/products/${moved.id}`);
+    expect(detail.body.category_id).toBe(other);
+    expect(detail.body.promotion).toBeNull();
+    // The mapping was corrected: the next read is served under the new category's version.
+    expect(await app.redis.get(`product:${moved.id}:category`)).toBe(JSON.stringify(other));
   });
 });
 

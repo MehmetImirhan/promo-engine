@@ -47,7 +47,7 @@ export async function startTestApp(options: TestAppOptions = {}): Promise<TestAp
   await redis.connect().catch(() => undefined);
   const cache = new Cache(redis, new CategoryVersions(redis, logger), logger);
 
-  const ingest = await ingestFixture(env.INGEST_MAX_ATTEMPTS);
+  const ingest = await ingestFixture(db, env.INGEST_MAX_ATTEMPTS, cache.versions);
   const app = createApp({
     pool,
     db,

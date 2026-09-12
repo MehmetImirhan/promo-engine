@@ -28,12 +28,12 @@ let processor: ChunkProcessor;
 beforeAll(async () => {
   pool = createPool(env.TEST_DATABASE_URL);
   db = createDb(pool);
-  fx = await ingestFixture(MAX_ATTEMPTS);
+  fx = await ingestFixture(db, MAX_ATTEMPTS);
   splitter = new Splitter(
-    { db, storage: fx.storage, splitQueue: fx.splitQueue, chunkQueue: fx.chunkQueue, logger },
+    { db, storage: fx.storage, splitQueue: fx.splitQueue, chunkQueue: fx.chunkQueue, logger, invalidation: fx.invalidation },
     { chunkSize: CHUNK, reserveMs: 1_000, maxAttempts: MAX_ATTEMPTS },
   );
-  processor = new ChunkProcessor({ db, storage: fx.storage, logger }, { maxAttempts: MAX_ATTEMPTS, staleAfterMs: STALE_MS });
+  processor = new ChunkProcessor({ db, storage: fx.storage, logger, invalidation: fx.invalidation }, { maxAttempts: MAX_ATTEMPTS, staleAfterMs: STALE_MS });
 });
 
 afterAll(async () => {

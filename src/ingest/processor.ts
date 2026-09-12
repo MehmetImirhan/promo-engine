@@ -25,6 +25,7 @@ import type { Logger } from '../shared/logger.js';
 import type { Storage } from '../storage/index.js';
 import { checkJobCompletion } from './completion.js';
 import type { InvocationContext } from './context.js';
+import type { IngestInvalidation } from './invalidation.js';
 import { DEFAULT_PRICING_RULES, priceRow, type PricingRules } from './pricing-rules.js';
 import { validateRow, type RowIssue } from './row-schema.js';
 import { sourceSeq } from './source-seq.sql.js';
@@ -34,6 +35,8 @@ export interface ProcessorDeps {
   db: Db;
   storage: Storage;
   logger: Logger;
+  /** Runs once when this chunk turns out to be the job's last. */
+  invalidation: IngestInvalidation;
 }
 
 export interface ProcessorOptions {
@@ -100,11 +103,19 @@ export class ChunkProcessor {
         .where('status', '=', 'PROCESSING')
         .execute();
       log.warn({ attempts, err: err instanceof Error ? err.message : err }, 'chunk: failed');
-      await checkJobCompletion(db, jobId, this.options.maxAttempts);
+      await this.finishIfLast(jobId);
       throw err;
     }
 
-    await checkJobCompletion(db, jobId, this.options.maxAttempts);
+    await this.finishIfLast(jobId);
+  }
+
+  /** Derived completion check; the cache hook fires only on the one call that flips the job. */
+  private async finishIfLast(jobId: string): Promise<void> {
+    const final = await checkJobCompletion(this.deps.db, jobId, this.options.maxAttempts);
+    if (final === null) return;
+    const bumped = await this.deps.invalidation.afterJobFinished(jobId);
+    this.deps.logger.info({ jobId, final, bumped }, 'job: finished; category versions bumped');
   }
 
   /**
@@ -151,7 +162,15 @@ export class ChunkProcessor {
       const categoryIds = await resolveCategories(trx, batch.map((r) => r.category));
       const applied = batch.length > 0 ? await upsertProducts(trx, job.job_seq, batch, categoryIds) : [];
 
-      const changed = new Set(applied.filter((r) => r.price_changed).map((r) => r.category_id));
+      const changed = new Set<string>();
+      for (const r of applied) {
+        if (r.price_changed) changed.add(r.category_id);
+        // A product that moved categories changes both listings, whatever its price did.
+        if (r.previous_category_id !== null && r.previous_category_id !== r.category_id) {
+          changed.add(r.category_id);
+          changed.add(r.previous_category_id);
+        }
+      }
       const outcome: ChunkOutcome = {
         rows_valid: valid.length,
         rows_invalid: invalid.length,
@@ -243,6 +262,8 @@ async function resolveCategories(db: Db, names: string[]): Promise<Map<string, s
 interface AppliedRow {
   sku: string;
   category_id: string;
+  /** null for a brand-new product. */
+  previous_category_id: string | null;
   price_changed: boolean;
 }
 
@@ -250,8 +271,9 @@ interface AppliedRow {
  * One statement for the whole batch. source_seq is computed in SQL from the
  * job's sequence and each row's number; the WHERE makes it newest-wins.
  * RETURNING only includes rows actually written, and OLD/NEW (Postgres 18)
- * tell us whether the price really moved. A brand-new product has OLD NULL,
- * so it counts as a price change for its category.
+ * tell us whether the price really moved and which category the row came
+ * from. A brand-new product has OLD NULL, so it counts as a price change
+ * for its category.
  */
 async function upsertProducts(
   db: Db,
@@ -285,6 +307,7 @@ async function upsertProducts(
       updated_at     = now()
     WHERE EXCLUDED.source_seq > products.source_seq
     RETURNING products.sku, products.category_id,
+              OLD.category_id AS previous_category_id,
               (OLD.base_price IS DISTINCT FROM NEW.base_price) AS price_changed
   `.execute(db);
   return result.rows;

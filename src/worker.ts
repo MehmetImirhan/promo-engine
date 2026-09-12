@@ -20,9 +20,11 @@
  *   npm run worker -- --only process-chunk   # to measure the two stages separately)
  */
 import { parseArgs } from 'node:util';
+import { CategoryVersions, createRedis } from './cache/index.js';
 import { ConfigError } from './config/env.js';
 import { createDb, createPool } from './db/index.js';
 import { contextWithDeadline } from './ingest/context.js';
+import { IngestInvalidation } from './ingest/invalidation.js';
 import { ChunkProcessor } from './ingest/processor.js';
 import { Splitter } from './ingest/splitter.js';
 import { createIngestQueues, createQueueConnection, type QueueWorker } from './queue/index.js';
@@ -45,6 +47,12 @@ async function main(): Promise<void> {
   const db = createDb(pool);
   const storage = new LocalStorage(env.STORAGE_DIR);
 
+  // Cache invalidation client, separate from the queue connection (BullMQ needs its own options).
+  const redis = createRedis(env.REDIS_URL);
+  redis.on('error', (err) => logger.warn({ err: err.message }, 'redis connection error'));
+  redis.connect().catch((err: Error) => logger.warn({ err: err.message }, 'redis unavailable at startup'));
+  const invalidation = new IngestInvalidation(db, new CategoryVersions(redis, logger));
+
   const connection = createQueueConnection(env.REDIS_URL);
   connection.on('error', (err) => logger.warn({ err: err.message }, 'queue redis connection error'));
   const queues = createIngestQueues({
@@ -55,11 +63,11 @@ async function main(): Promise<void> {
   });
 
   const splitter = new Splitter(
-    { db, storage, splitQueue: queues.split, chunkQueue: queues.processChunk, logger },
+    { db, storage, splitQueue: queues.split, chunkQueue: queues.processChunk, logger, invalidation },
     { chunkSize: env.INGEST_CHUNK_SIZE, reserveMs: env.INGEST_SPLIT_RESERVE_MS, maxAttempts: env.INGEST_MAX_ATTEMPTS },
   );
   const processor = new ChunkProcessor(
-    { db, storage, logger },
+    { db, storage, logger, invalidation },
     { maxAttempts: env.INGEST_MAX_ATTEMPTS, staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS },
   );
 
@@ -100,7 +108,7 @@ async function main(): Promise<void> {
 
     // Worker.close() waits for in-flight deliveries; anything not finished is redelivered after lockDuration.
     void Promise.allSettled(workers.map((w) => w.close()))
-      .then(() => Promise.allSettled([queues.close(), connection.quit(), pool.end()]))
+      .then(() => Promise.allSettled([queues.close(), connection.quit(), redis.quit(), pool.end()]))
       .then(() => {
         logger.info('worker shutdown complete');
         process.exit(0);

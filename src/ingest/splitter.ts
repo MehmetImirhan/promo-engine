@@ -29,6 +29,7 @@ import type { Logger } from '../shared/logger.js';
 import type { Storage } from '../storage/index.js';
 import { checkJobCompletion } from './completion.js';
 import type { InvocationContext } from './context.js';
+import type { IngestInvalidation } from './invalidation.js';
 import { missingColumns } from './row-schema.js';
 
 export interface SplitterDeps {
@@ -37,6 +38,8 @@ export interface SplitterDeps {
   splitQueue: Queue<SplitMessage>;
   chunkQueue: Queue<ProcessChunkMessage>;
   logger: Logger;
+  /** Runs when SPLIT_DONE finds every chunk already processed (or the file empty). */
+  invalidation: IngestInvalidation;
 }
 
 export interface SplitterOptions {
@@ -94,7 +97,12 @@ export class Splitter {
         .where('status', '=', 'SPLITTING')
         .execute();
       const final = await checkJobCompletion(db, job.id, this.options.maxAttempts);
-      log.info({ final }, 'split: done');
+      if (final !== null) {
+        const bumped = await this.deps.invalidation.afterJobFinished(job.id);
+        log.info({ final, bumped }, 'split: done; job finished; category versions bumped');
+      } else {
+        log.info('split: done');
+      }
     } catch (err) {
       if (err instanceof UnsplittableFile || err instanceof CsvError) {
         // Deterministic: retrying would fail identically. Fail the job and stop.

@@ -25,9 +25,9 @@ let splitter: Splitter;
 beforeAll(async () => {
   pool = createPool(env.TEST_DATABASE_URL);
   db = createDb(pool);
-  fx = await ingestFixture();
+  fx = await ingestFixture(db);
   splitter = new Splitter(
-    { db, storage: fx.storage, splitQueue: fx.splitQueue, chunkQueue: fx.chunkQueue, logger },
+    { db, storage: fx.storage, splitQueue: fx.splitQueue, chunkQueue: fx.chunkQueue, logger, invalidation: fx.invalidation },
     { chunkSize: CHUNK, reserveMs: 1_000, maxAttempts: 3 },
   );
 });
