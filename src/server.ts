@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { createApp } from './app.js';
 import { createRedis } from './cache/redis.js';
 import { ConfigError } from './config/env.js';
-import { createPool } from './db/index.js';
+import { createDb, createPool } from './db/index.js';
 import { createLogger } from './shared/logger.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -14,13 +14,14 @@ async function main(): Promise<void> {
 
   const pool = createPool(env.DATABASE_URL);
   pool.on('error', (err) => logger.error({ err }, 'idle postgres client error'));
+  const db = createDb(pool);
 
   const redis = createRedis(env.REDIS_URL);
   redis.on('error', (err) => logger.warn({ err: err.message }, 'redis connection error'));
   // Fail open: the API starts even if Redis is down; ioredis keeps retrying in the background.
   redis.connect().catch((err: Error) => logger.warn({ err: err.message }, 'redis unavailable at startup'));
 
-  const app = createApp({ pool, redis, logger });
+  const app = createApp({ pool, db, redis, logger });
   const server: Server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, 'api listening');
   });

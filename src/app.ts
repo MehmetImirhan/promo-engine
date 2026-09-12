@@ -2,12 +2,15 @@ import { randomUUID } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import { pinoHttp } from 'pino-http';
 import type { Redis } from './cache/redis.js';
-import type { Pool } from './db/index.js';
+import type { Db, Pool } from './db/index.js';
+import { productsRouter } from './products/router.js';
+import { createProductsService } from './products/service.js';
 import { errorHandler, notFoundHandler } from './shared/error-middleware.js';
 import type { Logger } from './shared/logger.js';
 
 export interface AppDeps {
   pool: Pool;
+  db: Db;
   redis: Redis;
   logger: Logger;
 }
@@ -23,7 +26,7 @@ async function check(probe: () => Promise<unknown>): Promise<CheckStatus> {
   }
 }
 
-export function createApp({ pool, redis, logger }: AppDeps): Express {
+export function createApp({ pool, db, redis, logger }: AppDeps): Express {
   const app = express();
   app.disable('x-powered-by');
 
@@ -64,6 +67,8 @@ export function createApp({ pool, redis, logger }: AppDeps): Express {
       checks: { postgres, redis: redisStatus },
     });
   });
+
+  app.use(productsRouter(createProductsService(db)));
 
   app.use(notFoundHandler);
   app.use(errorHandler);
