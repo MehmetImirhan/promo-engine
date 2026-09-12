@@ -18,6 +18,8 @@ const envSchema = z.object({
   TEST_DATABASE_URL: z
     .url({ protocol: /^postgres(ql)?$/ })
     .default('postgres://promo:promo@localhost:5432/promo_test'),
+  /** Used only by the integration test suite; a separate logical database that the setup FLUSHDBs. */
+  TEST_REDIS_URL: z.url({ protocol: /^rediss?$/ }).default('redis://localhost:6379/1'),
 
   // --- ingest pipeline (ADR §7) ---
   /** Root of the local Storage implementation (uploads and chunk files). S3 bucket in production. */

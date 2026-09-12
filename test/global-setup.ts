@@ -2,9 +2,11 @@
  * vitest globalSetup for the integration project.
  *
  * Ensures TEST_DATABASE_URL points at a database that exists, is migrated,
- * and is empty. It never touches DATABASE_URL's database, and refuses to run
- * if the two are the same so `npm test` can never truncate dev data.
+ * and is empty, and that TEST_REDIS_URL (a separate logical Redis db) is
+ * empty. It never touches DATABASE_URL's or REDIS_URL's data, and refuses to
+ * run if either pair is the same so `npm test` can never wipe dev data.
  */
+import { createRedis } from '../src/cache/index.js';
 import { env } from '../src/config/index.js';
 import { createPool, runMigrations } from '../src/db/index.js';
 
@@ -41,6 +43,18 @@ async function ensureDatabaseExists(): Promise<void> {
 export async function setup(): Promise<void> {
   if (env.TEST_DATABASE_URL === env.DATABASE_URL) {
     throw new Error('TEST_DATABASE_URL must differ from DATABASE_URL: refusing to truncate the app database');
+  }
+  if (env.TEST_REDIS_URL === env.REDIS_URL) {
+    throw new Error('TEST_REDIS_URL must differ from REDIS_URL: refusing to flush the app cache');
+  }
+
+  // Cached listings and version counters from a previous run must not outlive the truncated tables.
+  const redis = createRedis(env.TEST_REDIS_URL);
+  try {
+    await redis.connect();
+    await redis.flushdb();
+  } finally {
+    redis.disconnect();
   }
 
   await ensureDatabaseExists();

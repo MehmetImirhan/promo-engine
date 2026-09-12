@@ -1,12 +1,12 @@
 /**
- * Boots the real Express app against TEST_DATABASE_URL on an ephemeral port
- * and returns a tiny fetch wrapper. Redis is created lazily and never
- * connected: no route under test needs it, and /ready is not exercised here.
- * Ingest runs on a temp LocalStorage and in-memory queues the test can drain.
+ * Boots the real Express app against TEST_DATABASE_URL and TEST_REDIS_URL on
+ * an ephemeral port and returns a tiny fetch wrapper. Ingest runs on a temp
+ * LocalStorage and in-memory queues the test can drain. `redisUrl` can point
+ * at an unreachable address to exercise the fail-open path.
  */
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../../src/app.js';
-import { createRedis } from '../../src/cache/redis.js';
+import { Cache, CategoryVersions, createRedis, type Redis } from '../../src/cache/index.js';
 import { env } from '../../src/config/index.js';
 import { createDb, createPool, type Db, type Pool } from '../../src/db/index.js';
 import { createLogger } from '../../src/shared/logger.js';
@@ -22,9 +22,15 @@ export interface MultipartBody {
   file?: { name: string; content: string };
 }
 
+export interface TestAppOptions {
+  redisUrl?: string;
+}
+
 export interface TestApp {
   pool: Pool;
   db: Db;
+  redis: Redis;
+  cache: Cache;
   ingest: IngestFixture;
   get<T = unknown>(path: string): Promise<JsonResponse<T>>;
   post<T = unknown>(path: string, body?: unknown): Promise<JsonResponse<T>>;
@@ -32,17 +38,21 @@ export interface TestApp {
   close(): Promise<void>;
 }
 
-export async function startTestApp(): Promise<TestApp> {
+export async function startTestApp(options: TestAppOptions = {}): Promise<TestApp> {
   const pool = createPool(env.TEST_DATABASE_URL);
   const db = createDb(pool);
-  const redis = createRedis(env.REDIS_URL);
   const logger = createLogger({ level: 'silent', pretty: false });
+  const redis = createRedis(options.redisUrl ?? env.TEST_REDIS_URL);
+  redis.on('error', () => undefined); // fail-open paths are exercised on purpose; ioredis must not emit unhandled errors
+  await redis.connect().catch(() => undefined);
+  const cache = new Cache(redis, new CategoryVersions(redis, logger), logger);
 
   const ingest = await ingestFixture(env.INGEST_MAX_ATTEMPTS);
   const app = createApp({
     pool,
     db,
     redis,
+    cache,
     logger,
     storage: ingest.storage,
     queues: { split: ingest.splitQueue, processChunk: ingest.chunkQueue, deadLetter: ingest.dlq },
@@ -74,6 +84,8 @@ export async function startTestApp(): Promise<TestApp> {
   return {
     pool,
     db,
+    redis,
+    cache,
     ingest,
     get: (path) => request('GET', path),
     post: (path, body) => request('POST', path, body),

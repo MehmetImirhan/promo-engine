@@ -11,12 +11,15 @@ describe('loadEnv', () => {
       DATABASE_URL: 'postgres://promo:promo@localhost:5432/promo',
       REDIS_URL: 'redis://localhost:6379',
       TEST_DATABASE_URL: 'postgres://promo:promo@localhost:5432/promo_test',
+      TEST_REDIS_URL: 'redis://localhost:6379/1',
       STORAGE_DIR: './data',
       INGEST_CHUNK_SIZE: 1000,
       INGEST_WORKER_CONCURRENCY: 4,
       INGEST_MAX_ATTEMPTS: 3,
       INGEST_INVOCATION_TIMEOUT_MS: 60_000,
       INGEST_SPLIT_RESERVE_MS: 2000,
+      CACHE_ENABLED: true,
+      CACHE_SINGLE_FLIGHT: true,
     });
   });
 

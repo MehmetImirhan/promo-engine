@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import { createApp } from './app.js';
-import { createRedis } from './cache/redis.js';
+import { Cache, CategoryVersions, createRedis } from './cache/index.js';
 import { ConfigError } from './config/env.js';
 import { createDb, createPool } from './db/index.js';
 import { createIngestQueues, createQueueConnection } from './queue/index.js';
@@ -22,6 +22,10 @@ async function main(): Promise<void> {
   redis.on('error', (err) => logger.warn({ err: err.message }, 'redis connection error'));
   // Fail open: the API starts even if Redis is down; ioredis keeps retrying in the background.
   redis.connect().catch((err: Error) => logger.warn({ err: err.message }, 'redis unavailable at startup'));
+  const cache = new Cache(redis, new CategoryVersions(redis, logger), logger, {
+    enabled: env.CACHE_ENABLED,
+    singleFlight: env.CACHE_SINGLE_FLIGHT,
+  });
 
   // Ingest: the API only enqueues; src/worker.ts consumes.
   const queueConnection = createQueueConnection(env.REDIS_URL);
@@ -38,6 +42,7 @@ async function main(): Promise<void> {
     pool,
     db,
     redis,
+    cache,
     logger,
     storage,
     queues,

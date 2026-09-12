@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import { pinoHttp } from 'pino-http';
-import type { Redis } from './cache/redis.js';
+import type { Cache, Redis } from './cache/index.js';
 import type { Db, Pool } from './db/index.js';
 import { ingestRouter } from './ingest/router.js';
 import { IngestService, type IngestServiceOptions } from './ingest/service.js';
@@ -18,6 +18,7 @@ export interface AppDeps {
   pool: Pool;
   db: Db;
   redis: Redis;
+  cache: Cache;
   logger: Logger;
   storage: Storage;
   queues: IngestQueues;
@@ -35,7 +36,7 @@ async function check(probe: () => Promise<unknown>): Promise<CheckStatus> {
   }
 }
 
-export function createApp({ pool, db, redis, logger, storage, queues, ingest }: AppDeps): Express {
+export function createApp({ pool, db, redis, cache, logger, storage, queues, ingest }: AppDeps): Express {
   const app = express();
   app.disable('x-powered-by');
 
@@ -77,8 +78,8 @@ export function createApp({ pool, db, redis, logger, storage, queues, ingest }: 
     });
   });
 
-  app.use(productsRouter(new ProductsService(db)));
-  app.use(promotionsRouter(new PromotionsService(db)));
+  app.use(productsRouter(new ProductsService(db, cache)));
+  app.use(promotionsRouter(new PromotionsService(db, cache.versions)));
   app.use(ingestRouter(new IngestService(db, storage, queues, ingest)));
 
   app.use(notFoundHandler);

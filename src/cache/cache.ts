@@ -66,7 +66,7 @@ export class Cache {
     const hit = await this.get<T>(key);
     if (hit !== undefined) return hit;
     const value = await fn();
-    await this.set(key, ttlSeconds, value);
+    await this.put(key, ttlSeconds, value);
     return value;
   }
 
@@ -82,7 +82,8 @@ export class Cache {
     return raw === null ? undefined : (JSON.parse(raw) as T);
   }
 
-  private async set(key: string, ttlSeconds: number, value: unknown): Promise<void> {
+  /** Unconditional write; used to correct a derived entry the read path found to be wrong. Fail-open. */
+  async put(key: string, ttlSeconds: number, value: unknown): Promise<void> {
     try {
       await this.redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
     } catch (err) {
