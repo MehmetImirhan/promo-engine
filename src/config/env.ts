@@ -14,6 +14,10 @@ const envSchema = z.object({
     .url({ protocol: /^postgres(ql)?$/ })
     .default('postgres://promo:promo@localhost:5432/promo'),
   REDIS_URL: z.url({ protocol: /^rediss?$/ }).default('redis://localhost:6379'),
+  /** Used only by the integration test suite. Its tables are truncated before every run. */
+  TEST_DATABASE_URL: z
+    .url({ protocol: /^postgres(ql)?$/ })
+    .default('postgres://promo:promo@localhost:5432/promo_test'),
 });
 
 export type Env = z.infer<typeof envSchema>;

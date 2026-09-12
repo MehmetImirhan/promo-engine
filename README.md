@@ -29,6 +29,15 @@ has a default that matches `docker-compose.yml`.
 | `npm test`          | Unit + integration tests (needs docker compose) |
 | `npm run build`     | Compile to `dist/`                             |
 
+## Tests
+
+Unit tests live next to the code (`src/**/*.test.ts`) and need nothing running.
+Integration tests (`test/**/*.test.ts`) use a separate database given by
+`TEST_DATABASE_URL` (default `promo_test` on the compose Postgres). Before each
+run, `test/global-setup.ts` creates it if missing, migrates it, and truncates
+its tables. The application database in `DATABASE_URL` is never touched;
+the setup refuses to run if the two URLs are equal.
+
 ## Endpoints
 
 - `GET /health` — process is up (no dependencies)

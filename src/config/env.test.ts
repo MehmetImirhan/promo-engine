@@ -10,6 +10,7 @@ describe('loadEnv', () => {
       LOG_LEVEL: 'info',
       DATABASE_URL: 'postgres://promo:promo@localhost:5432/promo',
       REDIS_URL: 'redis://localhost:6379',
+      TEST_DATABASE_URL: 'postgres://promo:promo@localhost:5432/promo_test',
     });
   });
 
