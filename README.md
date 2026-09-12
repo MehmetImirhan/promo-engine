@@ -32,12 +32,15 @@ has a default that matches `docker-compose.yml`.
 | `npm run build`     | Compile to `dist/`                             |
 | `npm run ingest:generate` | Vendor CSV with realistic mess: `-- --rows N --out file [--seed S]` |
 | `npm run ingest:measure`  | 500k-row ingest under a 128 MB heap; prints wall time, RSS, continuations |
+| `npm run load`            | Flash-sale load test (ADR §4/§6): 50k-product category, listing + detail traffic, promotion created mid-run; `-- --single-flight off` for the comparison |
 
 ## Tests
 
 Unit tests live next to the code (`src/**/*.test.ts`) and need nothing running.
 Integration tests (`test/**/*.test.ts`) use a separate database given by
-`TEST_DATABASE_URL` (default `promo_test` on the compose Postgres). Before each
+`TEST_DATABASE_URL` (default `promo_test` on the compose Postgres) and a
+separate Redis logical database given by `TEST_REDIS_URL` (default db 1,
+flushed before each run). Before each
 run, `test/global-setup.ts` creates it if missing, migrates it, and truncates
 its tables. The application database in `DATABASE_URL` is never touched;
 the setup refuses to run if the two URLs are equal.
@@ -90,6 +93,18 @@ product scope wins.
 
 - `GET /health` — process is up (no dependencies)
 - `GET /ready` — Postgres and Redis reachable
+
+### Caching (ADR §6)
+
+`GET /products/:id` (300 s) and `GET /products` (60 s) are cache-aside in
+Redis. Every key embeds its category's version (`catver:{categoryId}`, and
+`catver:_all` for the unfiltered listing). Promotion create / cancel /
+assign, `POST /products`, and ingest job completion each do one `INCR`;
+nothing is ever deleted or scanned, and the old keys expire on their own.
+Concurrent misses for one key run one query (in-process single-flight).
+Every Redis error fails open to Postgres, including the version read.
+`CACHE_ENABLED=false` bypasses Redis entirely; `CACHE_SINGLE_FLIGHT=false`
+exists only for the measurement in the ADR.
 
 ### Ingest (Scenario A)
 
