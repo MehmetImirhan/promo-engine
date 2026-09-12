@@ -77,6 +77,8 @@ export interface IngestJobsTable {
   status: Generated<IngestJobStatus>;
   /** Splitter checkpoint: chunks [0, next_chunk_index) are written and enqueued. */
   next_chunk_index: Generated<number>;
+  /** Splitter runs for this job; continuations = split_invocations - 1. */
+  split_invocations: Generated<number>;
   error: string | null;
   created_at: GeneratedTimestamp;
   updated_at: GeneratedTimestamp;
@@ -89,6 +91,12 @@ export interface IngestChunksTable {
   status: Generated<IngestChunkStatus>;
   attempts: Generated<number>;
   row_count: number;
+  rows_valid: Generated<number>;
+  rows_invalid: Generated<number>;
+  /** Rows the upsert wrote, i.e. not skipped by the source_seq guard. */
+  rows_applied: Generated<number>;
+  /** Categories with at least one real base_price change in this chunk. */
+  changed_category_ids: Generated<string[]>;
   error: string | null;
   created_at: GeneratedTimestamp;
   updated_at: GeneratedTimestamp;
