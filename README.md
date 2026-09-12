@@ -12,6 +12,7 @@ Requires Node 20.12+ and Docker.
 docker compose up -d
 npm install
 npm run migrate
+npm run seed        # optional: 4 categories, 200 products, 2 promotions
 npm run dev
 ```
 
@@ -41,7 +42,51 @@ the setup refuses to run if the two URLs are equal.
 
 ## Endpoints
 
+All money fields (`base_price`, `effective_price`, promotion `value`) are
+decimal strings such as `"19.99"`, in requests and responses alike. JSON
+numbers for money are rejected with 400. Errors always have the shape
+`{ "error": { "code", "message", "details?" }, "requestId" }`.
+
+### Products
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET`  | `/products` | Query: `category_id` (uuid), `order` = `asc` \| `desc` (default `asc`), `limit` 1–100 (default 20), `cursor`. Sorted by `effective_price` in SQL, keyset-paginated. Response `{ items, next_cursor }`. |
+| `GET`  | `/products/:id` | Product with `effective_price` and the applied `promotion` (`{ id, name, type, value }` or `null`). |
+| `POST` | `/products` | Body `{ sku, name, category_id, base_price, stock_quantity? }` → 201 with the priced view. A product created into a category with an active promotion is returned already discounted. Duplicate SKU → 409. |
+
+Pagination: pass `next_cursor` back as `cursor` with the same `category_id`
+and `order`; `null` means last page. The cursor is opaque and bound to the
+listing that issued it — replaying it with a different `order` or
+`category_id` returns 400. There is no offset pagination.
+
+### Promotions
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/promotions` | Body `{ name, product_id \| category_id (exactly one), discount_type: "PERCENTAGE" \| "FIXED", value, starts_at, ends_at }` (ISO 8601 with offset) → 201. Product-scope `FIXED` with `value >= base_price` → 400. |
+| `POST` | `/promotions/:id/cancel` | Sets `status = "CANCELLED"` and returns the row. Idempotent. Rows are never deleted. |
+| `POST` | `/promotions/:id/assign` | Body `{ product_id \| category_id }`. Re-targets an active promotion in one `UPDATE`. Cancelled promotion → 409. |
+
+"At most one active promotion per product/category at a time" is enforced by
+the database's `EXCLUDE` constraints, not by application code. A conflicting
+create or assign returns:
+
+```json
+{ "error": { "code": "CONFLICT",
+             "message": "An active category-scope promotion already overlaps this window",
+             "details": { "constraint": "no_overlapping_category_promos", "scope": "category",
+                          "category_id": "…", "starts_at": "…", "ends_at": "…" } },
+  "requestId": "…" }
+```
+
+Cross-scope conflicts (a product promotion and a category promotion both
+covering one product) are resolved by precedence in the pricing query:
+product scope wins.
+
+### Operational
+
 - `GET /health` — process is up (no dependencies)
 - `GET /ready` — Postgres and Redis reachable
 
-Product, promotion and ingest endpoints are added in later sessions.
+Ingest endpoints are added in a later session.
