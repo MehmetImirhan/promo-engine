@@ -18,6 +18,27 @@ const envSchema = z.object({
   TEST_DATABASE_URL: z
     .url({ protocol: /^postgres(ql)?$/ })
     .default('postgres://promo:promo@localhost:5432/promo_test'),
+
+  // --- ingest pipeline (ADR §7) ---
+  /** Root of the local Storage implementation (uploads and chunk files). S3 bucket in production. */
+  STORAGE_DIR: z.string().min(1).default('./data'),
+  /**
+   * Rows per chunk = rows held in memory by one splitter or processor
+   * invocation. The upsert passes arrays, so SQL parameter limits never
+   * apply; the ceiling here is purely a memory bound.
+   */
+  INGEST_CHUNK_SIZE: z.coerce.number().int().min(1).max(10_000).default(1_000),
+  /** Concurrent chunk invocations per worker process (reserved concurrency in production). */
+  INGEST_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(4),
+  /** Queue delivery attempts per chunk before it is parked in the DLQ (SQS maxReceiveCount). */
+  INGEST_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(3),
+  /** Simulated function timeout: the worker builds remainingTimeMs() from it; also the stale-PROCESSING reclaim age. */
+  INGEST_INVOCATION_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(60_000),
+  /** The splitter re-enqueues itself when less than this much of the invocation remains. */
+  INGEST_SPLIT_RESERVE_MS: z.coerce.number().int().min(100).default(2_000),
+}).refine((e) => e.INGEST_SPLIT_RESERVE_MS < e.INGEST_INVOCATION_TIMEOUT_MS, {
+  path: ['INGEST_SPLIT_RESERVE_MS'],
+  message: 'must be smaller than INGEST_INVOCATION_TIMEOUT_MS',
 });
 
 export type Env = z.infer<typeof envSchema>;
