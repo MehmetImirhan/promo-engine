@@ -4,7 +4,9 @@ import { pinoHttp } from 'pino-http';
 import type { Redis } from './cache/redis.js';
 import type { Db, Pool } from './db/index.js';
 import { productsRouter } from './products/router.js';
-import { createProductsService } from './products/service.js';
+import { ProductsService } from './products/service.js';
+import { promotionsRouter } from './promotions/router.js';
+import { PromotionsService } from './promotions/service.js';
 import { errorHandler, notFoundHandler } from './shared/error-middleware.js';
 import type { Logger } from './shared/logger.js';
 
@@ -68,7 +70,8 @@ export function createApp({ pool, db, redis, logger }: AppDeps): Express {
     });
   });
 
-  app.use(productsRouter(createProductsService(db)));
+  app.use(productsRouter(new ProductsService(db)));
+  app.use(promotionsRouter(new PromotionsService(db)));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

@@ -6,6 +6,7 @@
 import { sql } from 'kysely';
 import type { Db, DiscountType } from '../db/index.js';
 import { NotFound } from '../shared/errors.js';
+import { translateIntegrityError, type ConstraintMessages } from '../shared/pg-errors.js';
 import { decodeCursor, encodeCursor, type CursorScope, type SortOrder } from './cursor.js';
 import { pricedProducts, type PricedProduct } from './effective-price.sql.js';
 
@@ -31,6 +32,21 @@ export interface ProductView {
   created_at: Date;
   updated_at: Date;
 }
+
+export interface CreateProductInput {
+  sku: string;
+  name: string;
+  category_id: string;
+  base_price: string;
+  stock_quantity: number;
+}
+
+const CONSTRAINTS: ConstraintMessages = {
+  products_sku_key: { path: 'sku', message: 'A product with this SKU already exists' },
+  products_category_id_fkey: { path: 'category_id', message: 'Unknown category_id' },
+  products_base_price_nonnegative: { path: 'base_price', message: 'base_price must be at least 0' },
+  products_stock_quantity_nonnegative: { path: 'stock_quantity', message: 'stock_quantity must be at least 0' },
+};
 
 export interface ListProductsParams {
   category_id?: string | undefined;
@@ -65,56 +81,69 @@ export function toProductView(row: PricedProduct): ProductView {
   };
 }
 
-export function createProductsService(db: Db) {
-  return {
-    async getProduct(id: string): Promise<ProductView> {
-      const row = await pricedProducts(db).where('p.id', '=', id).executeTakeFirst();
-      if (!row) throw new NotFound(`Product ${id} not found`);
-      return toProductView(row);
-    },
+export class ProductsService {
+  constructor(private readonly db: Db) {}
 
-    /**
-     * Keyset pagination (ADR §5). `pricedProducts()` is wrapped as a subquery
-     * so the WHERE and ORDER BY can name `effective_price` directly — a select
-     * alias is not visible in its own WHERE, and repeating the pricing
-     * expression here would duplicate the rule. Postgres flattens the wrapper,
-     * so the category filter still applies before the lateral join.
-     */
-    async listProducts({ category_id, order, limit, cursor }: ListProductsParams): Promise<ProductPage> {
-      const scope: CursorScope = { order, categoryId: category_id ?? null };
-      let query = db.selectFrom(pricedProducts(db).as('t')).selectAll('t');
+  async getProduct(id: string): Promise<ProductView> {
+    const row = await pricedProducts(this.db).where('p.id', '=', id).executeTakeFirst();
+    if (!row) throw new NotFound(`Product ${id} not found`);
+    return toProductView(row);
+  }
 
-      if (category_id !== undefined) {
-        query = query.where('t.category_id', '=', category_id);
-      }
+  /**
+   * One INSERT, then the normal priced read. A product created into a
+   * category with an active promotion is returned already discounted:
+   * that is Scenario B's auto-inherit, with no extra code.
+   */
+  async createProduct(input: CreateProductInput): Promise<ProductView> {
+    let id: string;
+    try {
+      ({ id } = await this.db.insertInto('products').values(input).returning('id').executeTakeFirstOrThrow());
+    } catch (err) {
+      return translateIntegrityError(err, CONSTRAINTS);
+    }
+    return this.getProduct(id);
+  }
 
-      if (cursor !== undefined) {
-        const key = decodeCursor(cursor, scope);
-        // Row-value comparison over the full sort key; `id` makes the order total.
-        // Ascending pages continue past the key, descending pages continue before it.
-        query =
-          order === 'asc'
-            ? query.where(sql<boolean>`(t.effective_price, t.id) > (${key.effectivePrice}::numeric, ${key.id}::uuid)`)
-            : query.where(sql<boolean>`(t.effective_price, t.id) < (${key.effectivePrice}::numeric, ${key.id}::uuid)`);
-      }
+  /**
+   * Keyset pagination (ADR §5). `pricedProducts()` is wrapped as a subquery
+   * so the WHERE and ORDER BY can name `effective_price` directly — a select
+   * alias is not visible in its own WHERE, and repeating the pricing
+   * expression here would duplicate the rule. Postgres flattens the wrapper,
+   * so the category filter still applies before the lateral join.
+   */
+  async listProducts({ category_id, order, limit, cursor }: ListProductsParams): Promise<ProductPage> {
+    const scope: CursorScope = { order, categoryId: category_id ?? null };
+    let query = this.db.selectFrom(pricedProducts(this.db).as('t')).selectAll('t');
 
-      // Fetch one extra row to learn whether a next page exists without a COUNT.
-      const rows = await query
-        .orderBy('t.effective_price', order)
-        .orderBy('t.id', order)
-        .limit(limit + 1)
-        .execute();
+    if (category_id !== undefined) {
+      query = query.where('t.category_id', '=', category_id);
+    }
 
-      const hasMore = rows.length > limit;
-      const page = hasMore ? rows.slice(0, limit) : rows;
-      const last = page.at(-1);
+    if (cursor !== undefined) {
+      const key = decodeCursor(cursor, scope);
+      // Row-value comparison over the full sort key; `id` makes the order total.
+      // Ascending pages continue past the key, descending pages continue before it.
+      query =
+        order === 'asc'
+          ? query.where(sql<boolean>`(t.effective_price, t.id) > (${key.effectivePrice}::numeric, ${key.id}::uuid)`)
+          : query.where(sql<boolean>`(t.effective_price, t.id) < (${key.effectivePrice}::numeric, ${key.id}::uuid)`);
+    }
 
-      return {
-        items: page.map(toProductView),
-        next_cursor: hasMore && last ? encodeCursor({ effectivePrice: last.effective_price, id: last.id }, scope) : null,
-      };
-    },
-  };
+    // Fetch one extra row to learn whether a next page exists without a COUNT.
+    const rows = await query
+      .orderBy('t.effective_price', order)
+      .orderBy('t.id', order)
+      .limit(limit + 1)
+      .execute();
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page.at(-1);
+
+    return {
+      items: page.map(toProductView),
+      next_cursor: hasMore && last ? encodeCursor({ effectivePrice: last.effective_price, id: last.id }, scope) : null,
+    };
+  }
 }
-
-export type ProductsService = ReturnType<typeof createProductsService>;
