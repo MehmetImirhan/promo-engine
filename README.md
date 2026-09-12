@@ -25,6 +25,7 @@ has a default that matches `docker-compose.yml`.
 | `npm run dev`       | API server with reload                         |
 | `npm run worker`    | Ingest worker (later session)                  |
 | `npm run migrate`   | Apply `db/migrations/*.sql` in order           |
+| `npm run seed`      | Dev data: `--categories N --products N`, idempotent |
 | `npm run typecheck` | `tsc --noEmit`                                 |
 | `npm test`          | Unit + integration tests (needs docker compose) |
 | `npm run build`     | Compile to `dist/`                             |

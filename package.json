@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "migrate": "tsx src/db/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
     "worker": "tsx src/worker.ts"
   },
   "dependencies": {
