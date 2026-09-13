@@ -558,61 +558,156 @@ $('#promotions-body').addEventListener('click', async (e) => {
 // ---------------------------------------------------------------------------
 
 const TERMINAL = new Set(['COMPLETED', 'PARTIAL', 'FAILED']);
-const ingest = { timer: null, watching: new Set() };
+const HOVER_HINT = 'Hover a chunk for its rows';
+const ingest = { selected: null, timer: null, run: 0, watching: new Set(), gridJob: null, cells: [], chunks: [], ghost: null };
+
+const fmtBytes = (n) => (n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const fmtDuration = (ms) =>
+  ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.floor(ms / 60_000)} min ${Math.floor((ms % 60_000) / 1000)} s`;
+const elapsedMs = (job) => new Date(job.completed_at ?? Date.now()).getTime() - new Date(job.created_at).getTime();
+const isSplitting = (job) => job.status === 'PENDING' || job.status === 'SPLITTING';
+const progressTone = (job) =>
+  job.status === 'COMPLETED' ? 'done' : job.status === 'PARTIAL' || job.status === 'FAILED' ? 'warn' : '';
+
+function jobSummary(job) {
+  const { total, DONE: done, FAILED: failed } = job.chunks;
+  const processed = job.rows.valid + job.rows.invalid;
+  switch (job.status) {
+    case 'PENDING':
+      return 'Queued. Waiting for a worker to start splitting the file.';
+    case 'SPLITTING':
+      return `Splitting the file: ${fmtCount(total)} chunks written so far, ${fmtCount(done)} already processed.`;
+    case 'SPLIT_DONE':
+      return `File split into ${fmtCount(total)} chunks. Processing, ${fmtCount(done)} done.`;
+    case 'COMPLETED':
+      return `Completed in ${fmtDuration(elapsedMs(job))}, ${fmtCount(Math.round(processed / Math.max(elapsedMs(job) / 1000, 0.001)))} rows per second.`;
+    case 'PARTIAL':
+      return `Finished with ${fmtCount(failed)} failed chunk${failed === 1 ? '' : 's'} after every retry.`;
+    default:
+      return job.error ?? 'The file could not be split.';
+  }
+}
 
 function jobRow(job) {
-  const { total, DONE: done, FAILED: failed } = job.chunks;
-  const splitting = job.status === 'PENDING' || job.status === 'SPLITTING';
-  const pct = total ? Math.round((done / total) * 100) : 0;
-  const barClass = splitting ? 'indeterminate' : job.status === 'COMPLETED' ? 'done' : job.status === 'PARTIAL' ? 'warn' : '';
-  const progressText = job.status === 'FAILED'
-    ? esc(job.error ?? 'File rejected')
-    : `${fmtCount(done)} of ${fmtCount(total)} chunks${failed ? ` · ${fmtCount(failed)} failed` : ''}`;
+  const { total, DONE: done } = job.chunks;
   return `
-    <tr>
+    <tr data-job="${esc(job.id)}"${job.id === ingest.selected ? ' aria-selected="true"' : ''}>
       <td><div class="title">${esc(job.vendor_id)}</div><div class="sub"><span class="mono">${esc(shortId(job.id))}</span> · ${esc(fmtDate(job.created_at))}</div></td>
       <td>${statusBadge(job.status)}</td>
-      <td><div class="progress ${barClass}"><div class="bar" style="width:${pct}%"></div></div><div class="sub">${progressText}</div></td>
+      <td><div class="progress ${progressTone(job)}"><div class="bar" style="width:${total ? (done / total) * 100 : 0}%"></div></div><div class="sub">${fmtCount(done)} of ${fmtCount(total)} chunks</div></td>
       <td class="num hide-sm"><div>${fmtCount(job.rows.applied)} applied</div><div class="sub">${fmtCount(job.rows.invalid)} invalid</div></td>
-      <td class="actions">${job.status === 'PARTIAL' || failed > 0 ? `<button class="btn ghost sm" type="button" data-replay="${esc(job.id)}">Replay failed</button>` : ''}</td>
     </tr>`;
 }
 
-async function loadJobs() {
+function renderJob(job, chunks) {
+  const { total, DONE: done } = job.chunks;
+  $('#job-card').hidden = false;
+  $('#job-vendor').textContent = job.vendor_id;
+  $('#job-id').textContent = shortId(job.id);
+  $('#job-status').innerHTML = statusBadge(job.status);
+  $('#job-summary').textContent = jobSummary(job);
+  // Replay also rescues a split that stalled (a lost message or a crashed worker); the API re-enqueues it.
+  const stalled = isSplitting(job) && Date.now() - new Date(job.updated_at).getTime() > 30_000;
+  $('#job-replay').hidden = !(job.status === 'PARTIAL' || job.chunks.FAILED > 0 || stalled);
+
+  const progress = $('#job-progress');
+  progress.className = `progress wide ${progressTone(job)}${TERMINAL.has(job.status) ? '' : ' live'}`;
+  $('.bar', progress).style.width = `${total ? (done / total) * 100 : 0}%`;
+
+  $('#job-stats').innerHTML = [
+    ['Chunks', `${fmtCount(done)} / ${fmtCount(total)}`],
+    ['Rows split', fmtCount(job.rows.total)],
+    ['Applied', fmtCount(job.rows.applied)],
+    ['Invalid', fmtCount(job.rows.invalid)],
+    ['Elapsed', fmtDuration(elapsedMs(job))],
+  ].map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
+
+  renderChunks(job, chunks);
+}
+
+// One square per chunk. Cells are updated in place so colour changes animate instead of redrawing.
+function renderChunks(job, chunks) {
+  const grid = $('#chunk-grid');
+  if (ingest.gridJob !== job.id) {
+    ingest.gridJob = job.id;
+    ingest.cells = [];
+    ingest.ghost = Object.assign(document.createElement('span'), { className: 'chunk ghost' });
+    grid.replaceChildren(ingest.ghost);
+    $('#chunk-detail').textContent = HOVER_HINT;
+  }
+  ingest.chunks = chunks;
+  for (const chunk of chunks) {
+    let cell = ingest.cells[chunk.chunk_index];
+    if (!cell) {
+      cell = document.createElement('span');
+      cell.className = 'chunk';
+      cell.dataset.index = String(chunk.chunk_index);
+      ingest.cells[chunk.chunk_index] = cell;
+      ingest.ghost.before(cell);
+    }
+    cell.dataset.status = chunk.status.toLowerCase();
+  }
+  // The pulsing outline is the next chunk the splitter has not written yet.
+  ingest.ghost.hidden = !isSplitting(job);
+  grid.classList.toggle('roomy', chunks.length <= 120);
+  if (chunks.length === 0 && !isSplitting(job)) $('#chunk-detail').textContent = 'No chunks were written';
+}
+
+async function refreshIngest() {
   clearTimeout(ingest.timer);
+  const run = ++ingest.run;
   const body = $('#jobs-body');
-  if (!body.children.length) body.innerHTML = skeletonRows(3, ['', '', '', 'hide-sm', '']);
-  let jobs;
+  if (!body.children.length) body.innerHTML = skeletonRows(3, ['', '', '', 'hide-sm']);
   try {
     const ids = await lookup('jobs');
-    jobs = await Promise.all(ids.map(({ id }) => api(`/ingest/jobs/${id}`)));
+    const jobs = await Promise.all(ids.map(({ id }) => api(`/ingest/jobs/${id}`)));
+    ingest.selected ??= jobs[0]?.id ?? null;
+    const selected = ingest.selected
+      ? jobs.find((j) => j.id === ingest.selected) ?? (await api(`/ingest/jobs/${ingest.selected}`))
+      : null;
+    const chunks = selected ? await lookup(`chunks?job=${selected.id}`) : [];
+    if (run !== ingest.run) return;
+
+    body.innerHTML = jobs.map(jobRow).join('');
+    $('#jobs-empty').hidden = jobs.length > 0;
+    $('#worker-note').hidden = !jobs.some((j) => j.status === 'PENDING' && Date.now() - new Date(j.created_at).getTime() > 5000);
+    if (selected) renderJob(selected, chunks);
+    else $('#job-card').hidden = true;
+
+    // A job that finished while we watched it changed the catalog: refresh products and category names.
+    const all = selected && !jobs.includes(selected) ? [...jobs, selected] : jobs;
+    if (all.some((j) => TERMINAL.has(j.status) && ingest.watching.has(j.id))) {
+      products.stale = true;
+      loadCategories();
+    }
+    ingest.watching = new Set(all.filter((j) => !TERMINAL.has(j.status)).map((j) => j.id));
+    if (ingest.watching.size > 0 && currentView() === 'ingest') ingest.timer = setTimeout(refreshIngest, 1000);
   } catch (err) {
-    body.innerHTML = '';
-    fail(err);
-    return;
+    if (run === ingest.run) fail(err);
   }
+}
 
-  body.innerHTML = jobs.map(jobRow).join('');
-  $('#jobs-empty').hidden = jobs.length > 0;
-  $('#worker-note').hidden = !jobs.some((j) => j.status === 'PENDING' && Date.now() - new Date(j.created_at).getTime() > 5000);
-
-  // A job that finished while we watched it changed the catalog: refresh products and category names.
-  if (jobs.some((j) => TERMINAL.has(j.status) && ingest.watching.has(j.id))) {
-    products.stale = true;
-    loadCategories();
-  }
-  ingest.watching = new Set(jobs.filter((j) => !TERMINAL.has(j.status)).map((j) => j.id));
-
-  if (ingest.watching.size > 0 && currentView() === 'ingest') {
-    ingest.timer = setTimeout(loadJobs, 1500);
-  }
+// fetch() cannot report upload progress; XMLHttpRequest can.
+function uploadWithProgress(form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/ingest/jobs');
+    xhr.responseType = 'json';
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    });
+    xhr.addEventListener('load', () =>
+      xhr.status < 400 ? resolve(xhr.response) : reject(new ApiError(xhr.status, xhr.response?.error)));
+    xhr.addEventListener('error', () => reject(new ApiError(0, { message: 'Upload failed: the UI server is not reachable' })));
+    xhr.send(form);
+  });
 }
 
 const dropzone = $('#dropzone');
 const fileInput = $('input[type="file"]', dropzone);
 const showFile = () => {
   const file = fileInput.files[0];
-  $('#file-label').textContent = file ? `${file.name} · ${fmtCount(Math.ceil(file.size / 1024))} KB` : 'Drop a CSV here or click to browse';
+  $('#file-label').textContent = file ? `${file.name} · ${fmtBytes(file.size)}` : 'Drop a CSV here or click to browse';
   dropzone.classList.toggle('has-file', Boolean(file));
 };
 fileInput.addEventListener('change', showFile);
@@ -632,39 +727,74 @@ dropzone.addEventListener('drop', (e) => {
 
 $('#upload-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const form = e.target;
-  const submit = $('[type="submit"]', form);
-  if (!fileInput.files.length) return toast('Choose a CSV file first', { error: true });
+  const file = fileInput.files[0];
+  if (!file) return toast('Choose a CSV file first', { error: true });
   const data = new FormData();
-  data.append('vendor_id', form.vendor_id.value);
-  data.append('file', fileInput.files[0]);
+  data.append('vendor_id', e.target.vendor_id.value);
+  data.append('file', file);
+
+  const submit = $('[type="submit"]', e.target);
+  const progress = $('#upload-progress');
+  const bar = $('.bar', progress);
+  const text = $('#upload-progress-text');
   submit.disabled = true;
+  bar.style.width = '0%';
+  text.textContent = 'Starting upload';
+  progress.hidden = false;
   try {
-    const job = await api('/ingest/jobs', { method: 'POST', form: data });
+    const job = await uploadWithProgress(data, (sent, total) => {
+      bar.style.width = `${(sent / total) * 100}%`;
+      text.textContent = sent < total ? `Uploading ${fmtBytes(sent)} of ${fmtBytes(total)}` : 'Storing the file';
+    });
     toast(job.created ? 'Upload accepted, job queued' : 'This file was already ingested for this vendor');
     fileInput.value = '';
     showFile();
-    loadJobs();
+    ingest.selected = job.id;
+    await refreshIngest();
+    $('#job-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (err) {
     fail(err);
   } finally {
     submit.disabled = false;
+    progress.hidden = true;
   }
 });
 
-$('#refresh-jobs').addEventListener('click', loadJobs);
-$('#jobs-body').addEventListener('click', async (e) => {
-  const replay = e.target.closest('[data-replay]');
-  if (!replay) return;
-  replay.disabled = true;
+$('#refresh-jobs').addEventListener('click', refreshIngest);
+$('#jobs-body').addEventListener('click', (e) => {
+  const row = e.target.closest('tr[data-job]');
+  if (!row) return;
+  ingest.selected = row.dataset.job;
+  refreshIngest();
+});
+$('#job-replay').addEventListener('click', async (e) => {
+  const button = e.currentTarget;
+  button.disabled = true;
   try {
-    const result = await api(`/ingest/jobs/${replay.dataset.replay}/replay-failed`, { method: 'POST' });
-    toast(`Re-enqueued ${result.replayed_chunks.length} chunk${result.replayed_chunks.length === 1 ? '' : 's'}`);
-    loadJobs();
+    const result = await api(`/ingest/jobs/${ingest.selected}/replay-failed`, { method: 'POST' });
+    const n = result.replayed_chunks.length;
+    toast(result.split_reenqueued && n === 0 ? 'Split re-enqueued' : `Re-enqueued ${n} chunk${n === 1 ? '' : 's'}`);
+    refreshIngest();
   } catch (err) {
-    replay.disabled = false;
     fail(err);
+  } finally {
+    button.disabled = false;
   }
+});
+
+const chunkGrid = $('#chunk-grid');
+chunkGrid.addEventListener('mouseover', (e) => {
+  const cell = e.target.closest('.chunk[data-index]');
+  const chunk = cell && ingest.chunks.find((c) => c.chunk_index === Number(cell.dataset.index));
+  if (!chunk) return;
+  const parts = [`Chunk #${chunk.chunk_index}`, titleCase(chunk.status), `${fmtCount(chunk.row_count)} rows`];
+  if (chunk.status === 'DONE') parts.push(`${fmtCount(chunk.rows_applied)} applied`, `${fmtCount(chunk.rows_invalid)} invalid`);
+  if (chunk.attempts > 1 || chunk.status === 'FAILED') parts.push(`attempt ${chunk.attempts}`);
+  if (chunk.error) parts.push(chunk.error);
+  $('#chunk-detail').textContent = parts.join(' · ');
+});
+chunkGrid.addEventListener('mouseleave', () => {
+  if (ingest.chunks.length > 0) $('#chunk-detail').textContent = HOVER_HINT;
 });
 
 // ---------------------------------------------------------------------------
@@ -707,7 +837,7 @@ function route() {
   clearTimeout(ingest.timer);
   if (view === 'products' && products.stale) loadProducts({ reset: true });
   if (view === 'promotions') loadPromotions();
-  if (view === 'ingest') loadJobs();
+  if (view === 'ingest') refreshIngest();
 }
 
 window.addEventListener('hashchange', route);

@@ -220,6 +220,46 @@ select {
 .progress.warn .bar { background: var(--warn); }
 .progress.indeterminate .bar { width: 35% !important; animation: slide-bar 1.1s ease-in-out infinite; }
 
+.upload-progress { flex: 1; display: grid; gap: 6px; align-self: center; min-width: 0; }
+.progress.wide { width: 100%; margin: 0; }
+.progress.live .bar {
+  background-image: linear-gradient(90deg, transparent, color-mix(in srgb, var(--surface) 45%, transparent), transparent);
+  background-size: 200% 100%; animation: shimmer 1.2s linear infinite;
+}
+tr[data-job] { cursor: pointer; }
+tbody tr[aria-selected="true"] { background: var(--surface-2); }
+tbody tr[aria-selected="true"] td:first-child { box-shadow: inset 2px 0 0 var(--primary); }
+
+#job-card { margin-bottom: 24px; scroll-margin-top: 80px; animation: fade .2s ease-out; }
+.job-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 14px; }
+.job-title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.job-title h3 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.job-summary { margin-top: 4px; color: var(--text-2); }
+.job-body { display: grid; gap: 18px; padding: 0 20px 20px; }
+.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 0; }
+.stats div { padding: 10px 14px; border-radius: 10px; background: var(--surface-2); }
+.stats dt { color: var(--text-3); font-size: 12px; }
+.stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+
+.chunk-panel { border: 1px solid var(--border); border-radius: 12px; }
+.chunk-grid { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 3px; min-height: 44px; padding: 14px; }
+.chunk {
+  display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+  background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border-strong);
+  transition: background .3s, box-shadow .3s, transform .12s;
+}
+.chunk-grid.roomy { gap: 5px; }
+.chunk-grid.roomy .chunk { width: 20px; height: 20px; border-radius: 5px; }
+.chunk[data-index]:hover { transform: scale(1.4); }
+.chunk[data-status="processing"] { background: var(--info); box-shadow: none; animation: pulse 1s ease-in-out infinite; }
+.chunk[data-status="done"] { background: var(--success); box-shadow: none; }
+.chunk[data-status="failed"] { background: var(--danger); box-shadow: none; }
+.chunk.ghost { background: transparent; box-shadow: inset 0 0 0 1.5px var(--text-3); animation: pulse 1s ease-in-out infinite; }
+.chunk-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 10px 14px; border-top: 1px solid var(--border); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--text-2); font-size: 12.5px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .chunk { width: 10px; height: 10px; animation: none; }
+
 /* ---------- dialogs ---------- */
 
 dialog { padding: 0; border: 0; background: transparent; color: inherit; max-width: none; max-height: none; }
@@ -278,6 +318,7 @@ dialog::backdrop { background: rgb(10 10 12 / 0.34); backdrop-filter: blur(2px);
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
 @keyframes slide-in { from { opacity: .4; transform: translateX(32px); } }
 @keyframes shimmer { to { background-position: -200% 0; } }
+@keyframes pulse { 50% { opacity: .45; } }
 @keyframes slide-bar { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
 
 @media (max-width: 720px) {
@@ -287,7 +328,11 @@ dialog::backdrop { background: rgb(10 10 12 / 0.34); backdrop-filter: blur(2px);
   main { padding: 24px 16px 72px; }
   .toolbar select { flex: 1; min-width: 0; }
   .grid-2 { grid-template-columns: 1fr; }
+  .upload-row { flex-wrap: wrap; }
   .upload-row .field { max-width: none; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .stats div:last-child { grid-column: 1 / -1; }
+  .job-head { flex-direction: column; }
 }
 @media (max-width: 480px) {
   .brand-name { display: none; }

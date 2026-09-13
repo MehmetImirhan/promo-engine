@@ -32,6 +32,8 @@ const pool = new pg.Pool({
   max: 4,
 });
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
@@ -72,6 +74,17 @@ const LOOKUPS = {
   },
 
   jobs: () => pool.query('SELECT id FROM ingest_jobs ORDER BY created_at DESC LIMIT 8'),
+
+  // Per-chunk state for the progress grid; the API's job status only has counts by status.
+  chunks: (params) => {
+    const job = params.get('job') ?? '';
+    if (!UUID.test(job)) return { rows: [] };
+    return pool.query(
+      `SELECT chunk_index, status, attempts, row_count, rows_valid, rows_invalid, rows_applied, error
+       FROM ingest_chunks WHERE job_id = $1 ORDER BY chunk_index`,
+      [job],
+    );
+  },
 };
 
 function send(res, status, body, type) {

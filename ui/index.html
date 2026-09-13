@@ -85,10 +85,41 @@
         </label>
         <div class="upload-row">
           <label class="field"><span>Vendor</span><input name="vendor_id" value="acme" autocomplete="off"></label>
+          <div class="upload-progress" id="upload-progress" hidden>
+            <div class="progress wide live"><div class="bar"></div></div>
+            <span class="sub" id="upload-progress-text">Starting upload</span>
+          </div>
           <button class="btn primary" type="submit">Upload</button>
         </div>
       </form>
-      <div class="note" id="worker-note" hidden>Jobs are waiting to be picked up. Start the worker with <code>npm run worker</code>.</div>
+      <div class="note" id="worker-note" hidden>A job is waiting to be picked up. Start the worker with <code>npm run worker</code>, or open the job and replay it.</div>
+
+      <div class="card" id="job-card" hidden>
+        <div class="job-head">
+          <div>
+            <div class="job-title"><h3 id="job-vendor"></h3><span class="sub mono" id="job-id"></span><span id="job-status"></span></div>
+            <div class="job-summary" id="job-summary"></div>
+          </div>
+          <button class="btn ghost sm" id="job-replay" type="button" hidden>Replay</button>
+        </div>
+        <div class="job-body">
+          <div class="progress wide" id="job-progress"><div class="bar"></div></div>
+          <dl class="stats" id="job-stats"></dl>
+          <div class="chunk-panel">
+            <div class="chunk-grid" id="chunk-grid"></div>
+            <div class="chunk-foot">
+              <div class="legend">
+                <span><i class="chunk"></i>Pending</span>
+                <span><i class="chunk" data-status="processing"></i>Processing</span>
+                <span><i class="chunk" data-status="done"></i>Done</span>
+                <span><i class="chunk" data-status="failed"></i>Failed</span>
+              </div>
+              <div class="sub" id="chunk-detail"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <h3>Recent jobs</h3>
@@ -98,7 +129,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Job</th><th>Status</th><th>Progress</th><th class="num hide-sm">Rows</th><th></th></tr></thead>
+            <thead><tr><th>Job</th><th>Status</th><th>Progress</th><th class="num hide-sm">Rows</th></tr></thead>
             <tbody id="jobs-body"></tbody>
           </table>
         </div>
