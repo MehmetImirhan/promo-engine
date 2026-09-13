@@ -1,6 +1,6 @@
 /**
  * POST /ingest/jobs (multipart, streamed, checksum-deduplicated),
- * GET /ingest/jobs/:id, POST /ingest/jobs/:id/replay-failed — through the
+ * GET /ingest/jobs, /ingest/jobs/:id, /ingest/jobs/:id/chunks, POST /ingest/jobs/:id/replay-failed — through the
  * HTTP layer with in-memory queues, then the pipeline drained by hand.
  */
 import { createHash, randomUUID } from 'node:crypto';
@@ -207,5 +207,53 @@ describe('POST /ingest/jobs/:id/replay-failed', () => {
 
   it('404 for an unknown job', async () => {
     expect((await app.post(`/ingest/jobs/${randomUUID()}/replay-failed`)).status).toBe(404);
+  });
+});
+
+describe('GET /ingest/jobs and GET /ingest/jobs/:id/chunks', () => {
+  let jobId: string;
+
+  beforeAll(async () => {
+    const res = await app.upload<CreatedBody>('/ingest/jobs', {
+      fields: { vendor_id: `vendor-${randomUUID().slice(0, 8)}` },
+      file: { name: 'v.csv', content: messyCsv(9) }, // 9 records at chunk size 4: chunks of 4, 4, 1
+    });
+    jobId = res.body.id;
+    await drainPipeline();
+  });
+
+  it('lists jobs newest first, each in the same shape as GET /ingest/jobs/:id', async () => {
+    const list = await app.get<{ items: JobStatusView[] }>('/ingest/jobs?limit=3');
+    expect(list.status).toBe(200);
+    expect(list.body.items).toHaveLength(3);
+    expect(list.body.items[0]!.id).toBe(jobId);
+
+    // Each item's counts come from grouped queries over all listed jobs; they must match the single-job read.
+    for (const item of list.body.items) {
+      expect(item).toEqual((await app.get<JobStatusView>(`/ingest/jobs/${item.id}`)).body);
+    }
+    expect((await app.get('/ingest/jobs?limit=51')).status).toBe(400);
+  });
+
+  it('lists every chunk of a job in order, with its row counts', async () => {
+    const [chunks, status] = await Promise.all([
+      app.get<{ items: Array<{ chunk_index: number; status: string; attempts: number; row_count: number; rows_valid: number; rows_invalid: number }> }>(
+        `/ingest/jobs/${jobId}/chunks`,
+      ),
+      app.get<JobStatusView>(`/ingest/jobs/${jobId}`),
+    ]);
+    expect(chunks.status).toBe(200);
+    expect(chunks.body.items.map((c) => [c.chunk_index, c.status, c.row_count])).toEqual([
+      [0, 'DONE', 4],
+      [1, 'DONE', 4],
+      [2, 'DONE', 1],
+    ]);
+    expect(chunks.body.items.every((c) => c.attempts === 1 && c.rows_valid + c.rows_invalid === c.row_count)).toBe(true);
+    expect(chunks.body.items.reduce((n, c) => n + c.rows_invalid, 0)).toBe(status.body.rows.invalid);
+  });
+
+  it('404 for an unknown job, 400 for a malformed id', async () => {
+    expect((await app.get<ErrorBody>(`/ingest/jobs/${randomUUID()}/chunks`)).status).toBe(404);
+    expect((await app.get<ErrorBody>('/ingest/jobs/nope/chunks')).status).toBe(400);
   });
 });

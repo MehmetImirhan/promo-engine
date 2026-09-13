@@ -6,3 +6,9 @@ export const createJobFields = z.object({
 });
 
 export const idParams = z.object({ id: z.uuid() });
+
+export const MAX_JOBS_PAGE = 50;
+
+export const listJobsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_JOBS_PAGE).default(10),
+});

@@ -135,7 +135,9 @@ that would land below cost are rejected as row errors).
 | Method | Path | Notes |
 |--------|------|-------|
 | `POST` | `/ingest/jobs` | `multipart/form-data` with `vendor_id` and `file`. The file is streamed to storage while hashed; `202 { id, status, created: true }`. The same file for the same vendor again → `200` with the existing job. |
+| `GET`  | `/ingest/jobs` | Query: `limit` 1–50 (default 10). Newest first, `{ items }` in the same shape as `GET /ingest/jobs/:id`. |
 | `GET`  | `/ingest/jobs/:id` | `status`, `split_invocations`, `chunks` by status, `rows` `{ total, valid, invalid, applied }`, `error_count`. |
+| `GET`  | `/ingest/jobs/:id/chunks` | Every chunk in order: `{ items: [{ chunk_index, status, attempts, row_count, rows_valid, rows_invalid, rows_applied, error, updated_at }] }`. Unpaginated: a 500k-row file is 500 chunks. |
 | `POST` | `/ingest/jobs/:id/replay-failed` | Re-enqueues `FAILED` chunks, chunks stuck in `PROCESSING` past the invocation timeout, and an unfinished split. Safe in any order. |
 
 Job status: `PENDING → SPLITTING → SPLIT_DONE → COMPLETED | PARTIAL`

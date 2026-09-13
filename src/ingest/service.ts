@@ -52,6 +52,59 @@ export interface IngestServiceOptions {
   staleAfterMs: number;
 }
 
+export interface ChunkView {
+  chunk_index: number;
+  status: IngestChunkStatus;
+  attempts: number;
+  row_count: number;
+  rows_valid: number;
+  rows_invalid: number;
+  rows_applied: number;
+  error: string | null;
+  updated_at: Date;
+}
+
+interface ChunkStatusCounts {
+  status: IngestChunkStatus;
+  chunks: string;
+  rows: string | null;
+  valid: string | null;
+  invalid: string | null;
+  applied: string | null;
+}
+
+/** Counts are bigint aggregates, strings from pg; they are row counts, never money. */
+function toStatusView(job: IngestJob, byStatus: ChunkStatusCounts[], errorCount: number): JobStatusView {
+  const chunks: JobStatusView['chunks'] = { total: 0, PENDING: 0, PROCESSING: 0, DONE: 0, FAILED: 0 };
+  const rows = { total: 0, valid: 0, invalid: 0, applied: 0 };
+  for (const r of byStatus) {
+    const n = Number(r.chunks);
+    chunks[r.status] += n;
+    chunks.total += n;
+    rows.total += Number(r.rows);
+    rows.valid += Number(r.valid);
+    rows.invalid += Number(r.invalid);
+    rows.applied += Number(r.applied);
+  }
+
+  return {
+    id: job.id,
+    vendor_id: job.vendor_id,
+    job_seq: job.job_seq,
+    status: job.status,
+    file_checksum: job.file_checksum,
+    next_chunk_index: job.next_chunk_index,
+    split_invocations: job.split_invocations,
+    error: job.error,
+    chunks,
+    rows,
+    error_count: errorCount,
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+    completed_at: job.completed_at,
+  };
+}
+
 export class IngestService {
   constructor(
     private readonly db: Db,
@@ -122,10 +175,39 @@ export class IngestService {
 
   async getStatus(jobId: string): Promise<JobStatusView> {
     const job = await this.findOrThrow(jobId);
+    const [view] = await this.statusViews([job]);
+    return view!;
+  }
+
+  /** Newest first; uuidv7 ids are creation order, so the primary key serves the sort. */
+  async listJobs(limit: number): Promise<JobStatusView[]> {
+    const jobs = await this.db.selectFrom('ingest_jobs').selectAll().orderBy('id', 'desc').limit(limit).execute();
+    return this.statusViews(jobs);
+  }
+
+  /**
+   * Every chunk of one job, in order. Unpaginated on purpose: the count is
+   * file rows / INGEST_CHUNK_SIZE, so a 500k-row file is 500 small rows.
+   */
+  async listChunks(jobId: string): Promise<ChunkView[]> {
+    await this.findOrThrow(jobId);
+    return this.db
+      .selectFrom('ingest_chunks')
+      .select(['chunk_index', 'status', 'attempts', 'row_count', 'rows_valid', 'rows_invalid', 'rows_applied', 'error', 'updated_at'])
+      .where('job_id', '=', jobId)
+      .orderBy('chunk_index')
+      .execute();
+  }
+
+  /** Two grouped queries for any number of jobs, never one pair per job. */
+  private async statusViews(jobs: IngestJob[]): Promise<JobStatusView[]> {
+    if (jobs.length === 0) return [];
+    const ids = jobs.map((j) => j.id);
 
     const byStatus = await this.db
       .selectFrom('ingest_chunks')
       .select((eb) => [
+        'job_id',
         'status',
         eb.fn.countAll<string>().as('chunks'),
         eb.fn.sum<string>('row_count').as('rows'),
@@ -133,44 +215,21 @@ export class IngestService {
         eb.fn.sum<string>('rows_invalid').as('invalid'),
         eb.fn.sum<string>('rows_applied').as('applied'),
       ])
-      .where('job_id', '=', jobId)
-      .groupBy('status')
+      .where('job_id', 'in', ids)
+      .groupBy(['job_id', 'status'])
       .execute();
 
     const errors = await this.db
       .selectFrom('ingest_row_errors')
-      .select((eb) => eb.fn.countAll<string>().as('n'))
-      .where('job_id', '=', jobId)
-      .executeTakeFirstOrThrow();
+      .select((eb) => ['job_id', eb.fn.countAll<string>().as('n')])
+      .where('job_id', 'in', ids)
+      .groupBy('job_id')
+      .execute();
+    const errorCounts = new Map(errors.map((e) => [e.job_id, Number(e.n)]));
 
-    const chunks: JobStatusView['chunks'] = { total: 0, PENDING: 0, PROCESSING: 0, DONE: 0, FAILED: 0 };
-    const rows = { total: 0, valid: 0, invalid: 0, applied: 0 };
-    for (const r of byStatus) {
-      const n = Number(r.chunks);
-      chunks[r.status] += n;
-      chunks.total += n;
-      rows.total += Number(r.rows);
-      rows.valid += Number(r.valid);
-      rows.invalid += Number(r.invalid);
-      rows.applied += Number(r.applied);
-    }
-
-    return {
-      id: job.id,
-      vendor_id: job.vendor_id,
-      job_seq: job.job_seq,
-      status: job.status,
-      file_checksum: job.file_checksum,
-      next_chunk_index: job.next_chunk_index,
-      split_invocations: job.split_invocations,
-      error: job.error,
-      chunks,
-      rows,
-      error_count: Number(errors.n),
-      created_at: job.created_at,
-      updated_at: job.updated_at,
-      completed_at: job.completed_at,
-    };
+    return jobs.map((job) =>
+      toStatusView(job, byStatus.filter((r) => r.job_id === job.id), errorCounts.get(job.id) ?? 0),
+    );
   }
 
   /**
