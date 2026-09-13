@@ -353,7 +353,7 @@ async function main(): Promise<void> {
       const cold = listingWindows[1]![1];
       const summary = [
         '',
-        '[MEASURE] lines for ADR.md:',
+        'Lines for ADR.md:',
         '§4',
         `- Uncached sorted listing, ${count.toLocaleString('en-US')}-product category, p95: ${fmt(percentile(uncached, 95))} ms`,
         `- Same, p99: ${fmt(percentile(uncached, 99))} ms`,
