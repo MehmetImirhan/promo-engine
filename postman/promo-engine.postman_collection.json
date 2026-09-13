@@ -130,6 +130,36 @@
       "name": "Products",
       "item": [
         {
+          "name": "List categories",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"categories have id and name\", () => { const c = pm.response.json().items; pm.expect(c).to.be.an(\"array\").that.is.not.empty; pm.expect(c[0]).to.have.keys(\"id\", \"name\"); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/categories",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "categories"
+              ]
+            },
+            "description": "Every category with its name, sorted by name."
+          },
+          "response": []
+        },
+        {
           "name": "List products (first page)",
           "event": [
             {
@@ -620,6 +650,87 @@
             "description": "Money must be a decimal string. Numbers are rejected so no float ever reaches the price path."
           },
           "response": []
+        },
+        {
+          "name": "Search products by SKU",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"finds product A\", () => pm.expect(pm.response.json().items.map((p) => p.id)).to.include(pm.collectionVariables.get(\"productId\")));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/search?q={{sku}}&limit=8",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{sku}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "8"
+                }
+              ]
+            },
+            "description": "Case-insensitive substring match on SKU or name, for picking a product by hand. Returns the stored product (base_price), not the priced view."
+          },
+          "response": []
+        },
+        {
+          "name": "Search products (one character) → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error code VALIDATION_ERROR\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/search?q=a",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "a"
+                }
+              ]
+            }
+          },
+          "response": []
         }
       ]
     },
@@ -730,6 +841,43 @@
               ]
             },
             "description": "Same product, same window. Refused by `no_overlapping_product_promos` (SQLSTATE 23P01 → 409)."
+          },
+          "response": []
+        },
+        {
+          "name": "List promotions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const item = pm.response.json().items.find((p) => p.id === pm.collectionVariables.get(\"promotionId\"));",
+                  "pm.test(\"new promotion listed as ACTIVE with its product\", () => { pm.expect(item.effective_status).to.eql(\"ACTIVE\"); pm.expect(item.product.id).to.eql(pm.collectionVariables.get(\"productId\")); pm.expect(item.category).to.be.null; });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/promotions?limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Newest first. Each item adds effective_status (status evaluated against now) and the named target."
           },
           "response": []
         },
@@ -1329,6 +1477,112 @@
               ]
             },
             "description": "PENDING → SPLITTING → SPLIT_DONE → COMPLETED | PARTIAL. Completion is derived from chunk statuses. Poll until it leaves SPLIT_DONE."
+          },
+          "response": []
+        },
+        {
+          "name": "List ingest jobs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"uploaded job is listed\", () => pm.expect(pm.response.json().items.map((j) => j.id)).to.include(pm.collectionVariables.get(\"jobId\")));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs?limit=5",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "5"
+                }
+              ]
+            },
+            "description": "Newest first, each in the same shape as GET /ingest/jobs/:id."
+          },
+          "response": []
+        },
+        {
+          "name": "List job chunks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"chunks in order\", () => { const c = pm.response.json().items; pm.expect(c.map((x) => x.chunk_index)).to.eql(c.map((_, i) => i)); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs/{{jobId}}/chunks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs",
+                "{{jobId}}",
+                "chunks"
+              ]
+            },
+            "description": "Every chunk in order with status, attempts and row counts. Empty until the worker has split the file."
+          },
+          "response": []
+        },
+        {
+          "name": "List job chunks (unknown job) → 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 404\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"error code NOT_FOUND\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"NOT_FOUND\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs/00000000-0000-7000-8000-000000000000/chunks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs",
+                "00000000-0000-7000-8000-000000000000",
+                "chunks"
+              ]
+            }
           },
           "response": []
         },
