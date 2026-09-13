@@ -6,4 +6,3 @@ data/
 *.log
 .DS_Store
 PROMPTS.md
-ui/

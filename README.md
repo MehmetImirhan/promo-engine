@@ -33,6 +33,7 @@ has a default that matches `docker-compose.yml`.
 | `npm run ingest:generate` | Vendor CSV with realistic mess: `-- --rows N --out file [--seed S]` |
 | `npm run ingest:measure`  | 500k-row ingest under a 128 MB heap; prints wall time, RSS, continuations |
 | `npm run load`            | Flash-sale load test (ADR §4/§6): 50k-product category, listing + detail traffic, promotion created mid-run; `-- --single-flight off` for the comparison |
+| `npm run ui`              | Web UI on http://localhost:5173 (API on 3000 must be running): products, promotions, ingest upload with live chunk progress |
 
 ## Tests
 

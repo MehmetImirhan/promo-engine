@@ -17,7 +17,8 @@
     "worker": "tsx src/worker.ts",
     "ingest:generate": "tsx scripts/ingest/generate.ts",
     "ingest:measure": "bash scripts/ingest/measure.sh",
-    "load": "tsx scripts/load/run.ts"
+    "load": "tsx scripts/load/run.ts",
+    "ui": "node ui/server.mjs"
   },
   "dependencies": {
     "bullmq": "^5.81.5",
