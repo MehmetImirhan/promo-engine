@@ -1,0 +1,1405 @@
+{
+  "info": {
+    "name": "Promotion Management API",
+    "description": "Catalog + promotion API with read-time effective pricing, keyset pagination, versioned Redis caching and a chunked CSV ingest pipeline.\n\n**Before running:** `docker compose up -d && npm run migrate && npm run seed && npm run dev`. The seed creates categories and products; there is no category endpoint, so the collection picks `categoryId` up from the first listing response.\n\n**Run order matters.** Requests chain through collection variables (`categoryId`, `productId`, `productBId`, `promotionId`, `cursor`, `jobId`). Use the Collection Runner top to bottom, or send them by hand in folder order.\n\nMoney is always a decimal string (`\"19.99\"`). JSON numbers for money are rejected with 400. Every error is `{ error: { code, message, details? }, requestId }`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "categoryId",
+      "value": ""
+    },
+    {
+      "key": "productId",
+      "value": ""
+    },
+    {
+      "key": "productBId",
+      "value": ""
+    },
+    {
+      "key": "sku",
+      "value": ""
+    },
+    {
+      "key": "cursor",
+      "value": ""
+    },
+    {
+      "key": "promotionId",
+      "value": ""
+    },
+    {
+      "key": "categoryPromotionId",
+      "value": ""
+    },
+    {
+      "key": "startsAt",
+      "value": ""
+    },
+    {
+      "key": "endsAt",
+      "value": ""
+    },
+    {
+      "key": "jobId",
+      "value": ""
+    }
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "exec": [
+          "pm.test(\"x-request-id header present\", () => pm.expect(pm.response.headers.has(\"x-request-id\")).to.be.true);"
+        ],
+        "type": "text/javascript"
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Operational",
+      "item": [
+        {
+          "name": "Health (liveness)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"status ok\", () => pm.expect(pm.response.json().status).to.eql(\"ok\"));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Ready (Postgres + Redis)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"both checks ok\", () => { const c = pm.response.json().checks; pm.expect(c.postgres).to.eql(\"ok\"); pm.expect(c.redis).to.eql(\"ok\"); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ready",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ready"
+              ]
+            },
+            "description": "200 when both Postgres and Redis answer, 503 with per-dependency detail otherwise."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "List products (first page)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"has items and a cursor\", () => { pm.expect(body.items).to.be.an(\"array\").that.is.not.empty; pm.expect(body).to.have.property(\"next_cursor\"); });",
+                  "pm.test(\"sorted by effective_price ascending\", () => {",
+                  "  const prices = body.items.map((p) => p.effective_price);",
+                  "  for (let i = 1; i < prices.length; i++) pm.expect(Number(prices[i]) >= Number(prices[i - 1])).to.be.true;",
+                  "});",
+                  "pm.collectionVariables.set(\"categoryId\", body.items[0].category_id);",
+                  "pm.collectionVariables.set(\"productId\", body.items[0].id);",
+                  "if (body.next_cursor) pm.collectionVariables.set(\"cursor\", body.next_cursor);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products?order=asc&limit=5",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "order",
+                  "value": "asc",
+                  "description": "asc | desc by effective_price"
+                },
+                {
+                  "key": "limit",
+                  "value": "5",
+                  "description": "1–100, default 20"
+                },
+                {
+                  "key": "category_id",
+                  "value": "{{categoryId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Sorted by `effective_price` in SQL, keyset-paginated. Seeds `categoryId`, `productId` and `cursor` for the requests that follow."
+          },
+          "response": []
+        },
+        {
+          "name": "List products (next page)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"items returned\", () => pm.expect(body.items).to.be.an(\"array\"));",
+                  "if (body.next_cursor) pm.collectionVariables.set(\"cursor\", body.next_cursor);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products?order=asc&limit=5&cursor={{cursor}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "order",
+                  "value": "asc"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}"
+                }
+              ]
+            },
+            "description": "Same `order` and `category_id` as the page that issued the cursor. `next_cursor: null` means last page."
+          },
+          "response": []
+        },
+        {
+          "name": "List products (cursor replayed with other order) → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error code VALIDATION_ERROR\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products?order=desc&limit=5&cursor={{cursor}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "order",
+                  "value": "desc"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}"
+                }
+              ]
+            },
+            "description": "The cursor is bound to the listing that issued it (order + category_id). Replaying it under a different scope is rejected."
+          },
+          "response": []
+        },
+        {
+          "name": "List products by category (desc)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"all items in the category\", () => body.items.forEach((p) => pm.expect(p.category_id).to.eql(pm.collectionVariables.get(\"categoryId\"))));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products?category_id={{categoryId}}&order=desc&limit=10",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "category_id",
+                  "value": "{{categoryId}}"
+                },
+                {
+                  "key": "order",
+                  "value": "desc"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get product",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const p = pm.response.json();",
+                  "pm.test(\"priced view\", () => { pm.expect(p.base_price).to.be.a(\"string\"); pm.expect(p.effective_price).to.be.a(\"string\"); pm.expect(p).to.have.property(\"promotion\"); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{productId}}"
+              ]
+            },
+            "description": "Product with `effective_price` and the applied `promotion` (`{ id, name, type, value }` or `null`). Cached 300 s, invalidated by the category version."
+          },
+          "response": []
+        },
+        {
+          "name": "Get product (unknown id) → 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 404\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"error code NOT_FOUND\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"NOT_FOUND\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/00000000-0000-7000-8000-000000000000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "00000000-0000-7000-8000-000000000000"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get product (malformed id) → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error code VALIDATION_ERROR\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/not-a-uuid",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "not-a-uuid"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create product A",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "pm.collectionVariables.set(\"sku\", \"PM-\" + Date.now());"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 201\", () => pm.response.to.have.status(201));",
+                  "const p = pm.response.json();",
+                  "pm.test(\"created with base_price 49.99\", () => { pm.expect(p.sku).to.eql(pm.collectionVariables.get(\"sku\")); pm.expect(p.base_price).to.eql(\"49.99\"); });",
+                  "pm.collectionVariables.set(\"productId\", p.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{sku}}\",\n  \"name\": \"Postman product A\",\n  \"category_id\": \"{{categoryId}}\",\n  \"base_price\": \"49.99\",\n  \"stock_quantity\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Returns the priced view (201). A product created into a category with an active promotion comes back already discounted. `productId` now points at this product for the promotion requests."
+          },
+          "response": []
+        },
+        {
+          "name": "Create product B",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 201\", () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set(\"productBId\", pm.response.json().id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{sku}}-B\",\n  \"name\": \"Postman product B\",\n  \"category_id\": \"{{categoryId}}\",\n  \"base_price\": \"30.00\",\n  \"stock_quantity\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Target for the assign request in the Promotions folder."
+          },
+          "response": []
+        },
+        {
+          "name": "Create product (duplicate SKU) → 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 409\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"error code CONFLICT\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"CONFLICT\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{sku}}\",\n  \"name\": \"Postman product A again\",\n  \"category_id\": \"{{categoryId}}\",\n  \"base_price\": \"49.99\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create product (money as JSON number) → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error code VALIDATION_ERROR\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{sku}}-bad\",\n  \"name\": \"Bad price\",\n  \"category_id\": \"{{categoryId}}\",\n  \"base_price\": 49.99\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Money must be a decimal string. Numbers are rejected so no float ever reaches the price path."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Promotions",
+      "description": "Exactly one scope per promotion (`product_id` XOR `category_id`). Overlap within a scope is refused by the database EXCLUDE constraints (409). Cross-scope conflicts resolve by precedence: product scope wins.",
+      "item": [
+        {
+          "name": "Create product promotion (15 %)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Fresh window on every run: starts now, ends in 7 days.",
+                  "const now = new Date();",
+                  "pm.collectionVariables.set(\"startsAt\", now.toISOString());",
+                  "pm.collectionVariables.set(\"endsAt\", new Date(now.getTime() + 7 * 24 * 3600 * 1000).toISOString());"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 201\", () => pm.response.to.have.status(201));",
+                  "const promo = pm.response.json();",
+                  "pm.test(\"active product-scope promotion\", () => { pm.expect(promo.status).to.eql(\"ACTIVE\"); pm.expect(promo.product_id).to.eql(pm.collectionVariables.get(\"productId\")); });",
+                  "pm.collectionVariables.set(\"promotionId\", promo.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman 15% off product A\",\n  \"product_id\": \"{{productId}}\",\n  \"discount_type\": \"PERCENTAGE\",\n  \"value\": \"15\",\n  \"starts_at\": \"{{startsAt}}\",\n  \"ends_at\": \"{{endsAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/promotions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create overlapping product promotion → 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 409\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"error code CONFLICT\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"CONFLICT\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});",
+                  "pm.test(\"structured constraint details\", () => { const d = pm.response.json().error.details; pm.expect(d.scope).to.eql(\"product\"); pm.expect(d.constraint).to.be.a(\"string\"); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman overlapping promo\",\n  \"product_id\": \"{{productId}}\",\n  \"discount_type\": \"PERCENTAGE\",\n  \"value\": \"10\",\n  \"starts_at\": \"{{startsAt}}\",\n  \"ends_at\": \"{{endsAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/promotions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions"
+              ]
+            },
+            "description": "Same product, same window. Refused by `no_overlapping_product_promos` (SQLSTATE 23P01 → 409)."
+          },
+          "response": []
+        },
+        {
+          "name": "Get product A (discounted)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const p = pm.response.json();",
+                  "pm.test(\"effective_price 42.49 from the new promotion\", () => { pm.expect(p.effective_price).to.eql(\"42.49\"); pm.expect(p.promotion.id).to.eql(pm.collectionVariables.get(\"promotionId\")); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{productId}}"
+              ]
+            },
+            "description": "49.99 × 0.85 = 42.4915, rounded half-up to 42.49. Served fresh: the promotion create bumped the category version. Holds even when the category has its own active promotion: product scope wins."
+          },
+          "response": []
+        },
+        {
+          "name": "Assign promotion to product B",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"now targets product B\", () => pm.expect(pm.response.json().product_id).to.eql(pm.collectionVariables.get(\"productBId\")));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productBId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/promotions/{{promotionId}}/assign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions",
+                "{{promotionId}}",
+                "assign"
+              ]
+            },
+            "description": "Re-targets the active promotion in one UPDATE. Both categories' versions are bumped so A and B are re-priced on the next read."
+          },
+          "response": []
+        },
+        {
+          "name": "Get product B (discounted after assign)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const p = pm.response.json();",
+                  "pm.test(\"30.00 × 0.85 = 25.50\", () => { pm.expect(p.effective_price).to.eql(\"25.50\"); pm.expect(p.promotion.id).to.eql(pm.collectionVariables.get(\"promotionId\")); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productBId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{productBId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get product A (product promotion gone)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const p = pm.response.json();",
+                  "pm.test(\"moved promotion no longer applies\", () => {",
+                  "  if (p.promotion === null) pm.expect(p.effective_price).to.eql(p.base_price);",
+                  "  else pm.expect(p.promotion.id).to.not.eql(pm.collectionVariables.get(\"promotionId\"));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{productId}}"
+              ]
+            },
+            "description": "The moved promotion no longer applies. If the category carries an active category-scope promotion (the seed adds a 20 % one), A now falls back to it: that is the product-over-category precedence in action. Otherwise A is back at its base price."
+          },
+          "response": []
+        },
+        {
+          "name": "Create category promotion (FIXED 5.00, future window)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const start = new Date(Date.now() + 60 * 24 * 3600 * 1000);",
+                  "pm.collectionVariables.set(\"startsAt\", start.toISOString());",
+                  "pm.collectionVariables.set(\"endsAt\", new Date(start.getTime() + 7 * 24 * 3600 * 1000).toISOString());"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 201\", () => pm.response.to.have.status(201));",
+                  "const promo = pm.response.json();",
+                  "pm.test(\"category-scope\", () => pm.expect(promo.category_id).to.eql(pm.collectionVariables.get(\"categoryId\")));",
+                  "pm.collectionVariables.set(\"categoryPromotionId\", promo.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman 5.00 off category\",\n  \"category_id\": \"{{categoryId}}\",\n  \"discount_type\": \"FIXED\",\n  \"value\": \"5.00\",\n  \"starts_at\": \"{{startsAt}}\",\n  \"ends_at\": \"{{endsAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/promotions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions"
+              ]
+            },
+            "description": "One INSERT, no per-product iteration. The window starts in 60 days so it cannot overlap the seed's 30-day category promotion. Category-scope FIXED skips the `value >= base_price` check; the price floors at 0 at read time."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel category promotion",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"CANCELLED\", () => pm.expect(pm.response.json().status).to.eql(\"CANCELLED\"));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/promotions/{{categoryPromotionId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions",
+                "{{categoryPromotionId}}",
+                "cancel"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel product promotion",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"CANCELLED\", () => pm.expect(pm.response.json().status).to.eql(\"CANCELLED\"));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/promotions/{{promotionId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions",
+                "{{promotionId}}",
+                "cancel"
+              ]
+            },
+            "description": "Sets `status = CANCELLED` and returns the row. Idempotent; rows are never deleted."
+          },
+          "response": []
+        },
+        {
+          "name": "Assign cancelled promotion → 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 409\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"error code CONFLICT\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"CONFLICT\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/promotions/{{promotionId}}/assign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions",
+                "{{promotionId}}",
+                "assign"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create promotion with both scopes → 400",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Fresh window on every run: starts now, ends in 7 days.",
+                  "const now = new Date();",
+                  "pm.collectionVariables.set(\"startsAt\", now.toISOString());",
+                  "pm.collectionVariables.set(\"endsAt\", new Date(now.getTime() + 7 * 24 * 3600 * 1000).toISOString());"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error code VALIDATION_ERROR\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Two scopes\",\n  \"product_id\": \"{{productId}}\",\n  \"category_id\": \"{{categoryId}}\",\n  \"discount_type\": \"PERCENTAGE\",\n  \"value\": \"10\",\n  \"starts_at\": \"{{startsAt}}\",\n  \"ends_at\": \"{{endsAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/promotions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create FIXED promotion ≥ base price → 400",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Fresh window on every run: starts now, ends in 7 days.",
+                  "const now = new Date();",
+                  "pm.collectionVariables.set(\"startsAt\", now.toISOString());",
+                  "pm.collectionVariables.set(\"endsAt\", new Date(now.getTime() + 7 * 24 * 3600 * 1000).toISOString());"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error code VALIDATION_ERROR\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Too deep\",\n  \"product_id\": \"{{productId}}\",\n  \"discount_type\": \"FIXED\",\n  \"value\": \"49.99\",\n  \"starts_at\": \"{{startsAt}}\",\n  \"ends_at\": \"{{endsAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/promotions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions"
+              ]
+            },
+            "description": "Product-scope FIXED with `value >= base_price` is rejected at creation."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel unknown promotion → 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 404\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"error code NOT_FOUND\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"NOT_FOUND\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/promotions/00000000-0000-7000-8000-000000000000/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "promotions",
+                "00000000-0000-7000-8000-000000000000",
+                "cancel"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Ingest",
+      "description": "Vendor CSV with header `sku,name,category,cost,stock_quantity`. Generate one with `npm run ingest:generate -- --rows 20000 --out data/vendor.csv` and start the worker with `npm run worker` in a second terminal.\n\nPick the file in the `file` form field before sending (Postman only stores file paths per machine).",
+      "item": [
+        {
+          "name": "Create ingest job (upload CSV)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"202 created or 200 deduplicated\", () => pm.expect([200, 202]).to.include(pm.response.code));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"job id and created flag\", () => { pm.expect(body.id).to.be.a(\"string\"); pm.expect(body.created).to.eql(pm.response.code === 202); });",
+                  "pm.collectionVariables.set(\"jobId\", body.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "vendor_id",
+                  "value": "acme",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "data/vendor.csv",
+                  "description": "CSV with sku,name,category,cost,stock_quantity"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs"
+              ]
+            },
+            "description": "The file is streamed to storage while hashed, a `split` job is enqueued and 202 is returned. Re-posting the same file for the same vendor returns the existing job with 200 (`created: false`)."
+          },
+          "response": []
+        },
+        {
+          "name": "Create ingest job (missing file) → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error code VALIDATION_ERROR\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "vendor_id",
+                  "value": "acme",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get ingest job status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const job = pm.response.json();",
+                  "pm.test(\"status and counters\", () => { pm.expect(job.status).to.be.oneOf([\"PENDING\",\"SPLITTING\",\"SPLIT_DONE\",\"COMPLETED\",\"PARTIAL\",\"FAILED\"]); pm.expect(job.chunks).to.be.an(\"object\"); pm.expect(job.rows).to.be.an(\"object\"); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs/{{jobId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs",
+                "{{jobId}}"
+              ]
+            },
+            "description": "PENDING → SPLITTING → SPLIT_DONE → COMPLETED | PARTIAL. Completion is derived from chunk statuses. Poll until it leaves SPLIT_DONE."
+          },
+          "response": []
+        },
+        {
+          "name": "Replay failed chunks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs/{{jobId}}/replay-failed",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs",
+                "{{jobId}}",
+                "replay-failed"
+              ]
+            },
+            "description": "Re-enqueues FAILED chunks, chunks stuck in PROCESSING past the invocation timeout, and an unfinished split. The `source_seq` guard makes replay safe in any order."
+          },
+          "response": []
+        },
+        {
+          "name": "Get ingest job (unknown id) → 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"status 404\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"error code NOT_FOUND\", () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql(\"NOT_FOUND\");",
+                  "  pm.expect(body.requestId).to.be.a(\"string\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ingest/jobs/00000000-0000-7000-8000-000000000000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingest",
+                "jobs",
+                "00000000-0000-7000-8000-000000000000"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

@@ -89,6 +89,20 @@ Cross-scope conflicts (a product promotion and a category promotion both
 covering one product) are resolved by precedence in the pricing query:
 product scope wins.
 
+### Postman
+
+`postman/promo-engine.postman_collection.json` covers every endpoint above,
+including the 400/404/409 cases. Requests chain through collection variables
+(`categoryId` is picked up from the first listing, so run `npm run seed`
+first) and each carries assertions, so it doubles as a smoke test:
+
+```sh
+npx newman run postman/promo-engine.postman_collection.json --working-dir .
+```
+
+The ingest upload points at `data/vendor.csv` (create it with
+`npm run ingest:generate -- --rows 200 --out data/vendor.csv`).
+
 ### Operational
 
 - `GET /health` — process is up (no dependencies)
