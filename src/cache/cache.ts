@@ -79,7 +79,14 @@ export class Cache {
       return undefined;
     }
     this.noteRecovery();
-    return raw === null ? undefined : (JSON.parse(raw) as T);
+    if (raw === null) return undefined;
+    try {
+      return JSON.parse(raw) as T;
+    } catch (err) {
+      // A corrupt or foreign-shaped entry is a miss, not a 500; the fresh value overwrites it.
+      this.logger.warn({ key, err: errorMessage(err) }, 'cache: unparseable entry; treating as a miss');
+      return undefined;
+    }
   }
 
   /** Unconditional write; used to correct a derived entry the read path found to be wrong. Fail-open. */

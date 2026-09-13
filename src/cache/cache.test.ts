@@ -46,6 +46,15 @@ function build(redis: CacheRedis & VersionRedis, options = {}) {
 }
 
 describe('Cache.getOrCompute', () => {
+  it('treats an unparseable entry as a miss and overwrites it', async () => {
+    const redis = fakeRedis();
+    const { cache } = build(redis);
+    redis.store.set('k', '{"truncated":');
+
+    expect(await cache.getOrCompute('k', 30, async () => ({ n: 1 }))).toEqual({ n: 1 });
+    expect(redis.store.get('k')).toBe('{"n":1}');
+  });
+
   it('computes on miss, stores with a TTL, and serves the stored value on the next call', async () => {
     const redis = fakeRedis();
     const { cache } = build(redis);
