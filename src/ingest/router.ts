@@ -2,7 +2,7 @@ import type { Readable } from 'node:stream';
 import busboy from 'busboy';
 import { Router, type Request, type Response } from 'express';
 import { Validation } from '../shared/errors.js';
-import { createJobFields, idParams, listJobsQuery } from './schemas.js';
+import { createJobFields, idParams, listErrorsQuery, listJobsQuery } from './schemas.js';
 import type { IngestService, Upload } from './service.js';
 
 interface MultipartResult {
@@ -82,6 +82,12 @@ export function ingestRouter(ingest: IngestService): Router {
   router.get('/ingest/jobs/:id/chunks', async (req: Request, res: Response) => {
     const { id } = idParams.parse(req.params);
     res.json({ items: await ingest.listChunks(id) });
+  });
+
+  router.get('/ingest/jobs/:id/errors', async (req: Request, res: Response) => {
+    const { id } = idParams.parse(req.params);
+    const { limit, after } = listErrorsQuery.parse(req.query);
+    res.json({ items: await ingest.listRowErrors(id, limit, after) });
   });
 
   router.post('/ingest/jobs/:id/replay-failed', async (req: Request, res: Response) => {

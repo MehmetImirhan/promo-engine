@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { env } from '../../src/config/index.js';
 import type { InvocationContext } from '../../src/ingest/context.js';
 import { ChunkProcessor } from '../../src/ingest/processor.js';
-import type { JobStatusView, ReplayResult } from '../../src/ingest/service.js';
+import type { JobStatusView, ReplayResult, RowErrorView } from '../../src/ingest/service.js';
 import { Splitter } from '../../src/ingest/splitter.js';
 import { createLogger } from '../../src/shared/logger.js';
 import { startTestApp, type TestApp } from '../helpers/app.js';
@@ -169,6 +169,44 @@ describe('GET /ingest/jobs/:id', () => {
   it('404 for an unknown id, 400 for a non-uuid', async () => {
     expect((await app.get(`/ingest/jobs/${randomUUID()}`)).status).toBe(404);
     expect((await app.get('/ingest/jobs/not-a-uuid')).status).toBe(400);
+  });
+});
+
+describe('GET /ingest/jobs/:id/errors', () => {
+  it('returns the rejected rows in file order with the raw row and a path per issue, keyset-paged on row_no', async () => {
+    const res = await app.upload<CreatedBody>('/ingest/jobs', {
+      fields: { vendor_id: `vendor-${randomUUID().slice(0, 8)}` },
+      file: {
+        name: 'v.csv',
+        content: [HEADER, 'E-1,Fine,Shoes,10.00,1', 'E-2,Short row', 'E-3,Bad cost,Shoes,ten,1', 'E-4,Fine,Shoes,10.00,1', 'E-5,Negative,Shoes,10.00,-1'].join('\n') + '\n',
+      },
+    });
+    const id = res.body.id;
+    await drainPipeline();
+    expect((await app.get<JobStatusView>(`/ingest/jobs/${id}`)).body).toMatchObject({ status: 'COMPLETED', error_count: 3 });
+
+    const all = await app.get<{ items: RowErrorView[] }>(`/ingest/jobs/${id}/errors`);
+    expect(all.status).toBe(200);
+    expect(all.body.items.map((e) => [e.row_no, e.chunk_index, e.sku])).toEqual([
+      [2, 0, 'E-2'],
+      [3, 0, 'E-3'],
+      [5, 1, 'E-5'],
+    ]);
+    expect(all.body.items[1]).toMatchObject({
+      raw: { sku: 'E-3', name: 'Bad cost', category: 'Shoes', cost: 'ten', stock_quantity: '1' },
+      errors: expect.arrayContaining([{ path: 'cost', message: expect.any(String) }]),
+    });
+    expect(all.body.items[2]!.errors).toEqual([{ path: 'stock_quantity', message: expect.stringMatching(/non-negative/) }]);
+
+    const page1 = await app.get<{ items: RowErrorView[] }>(`/ingest/jobs/${id}/errors?limit=2`);
+    const page2 = await app.get<{ items: RowErrorView[] }>(`/ingest/jobs/${id}/errors?limit=2&after=${page1.body.items.at(-1)!.row_no}`);
+    expect(page1.body.items.map((e) => e.row_no)).toEqual([2, 3]);
+    expect(page2.body.items.map((e) => e.row_no)).toEqual([5]);
+  });
+
+  it('404 for an unknown job, 400 for a bad limit', async () => {
+    expect((await app.get(`/ingest/jobs/${randomUUID()}/errors`)).status).toBe(404);
+    expect((await app.get(`/ingest/jobs/${randomUUID()}/errors?limit=0`)).status).toBe(400);
   });
 });
 

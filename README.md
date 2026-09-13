@@ -138,13 +138,16 @@ that would land below cost are rejected as row errors).
 | `GET`  | `/ingest/jobs` | Query: `limit` 1–50 (default 10). Newest first, `{ items }` in the same shape as `GET /ingest/jobs/:id`. |
 | `GET`  | `/ingest/jobs/:id` | `status`, `split_invocations`, `chunks` by status, `rows` `{ total, valid, invalid, applied }`, `error_count`. |
 | `GET`  | `/ingest/jobs/:id/chunks` | Every chunk in order: `{ items: [{ chunk_index, status, attempts, row_count, rows_valid, rows_invalid, rows_applied, error, updated_at }] }`. Unpaginated: a 500k-row file is 500 chunks. |
+| `GET`  | `/ingest/jobs/:id/errors` | Rejected rows in file order: `{ items: [{ row_no, chunk_index, sku, raw, errors: [{ path, message }] }] }`. Query: `limit` 1–500 (default 100), `after` = last `row_no` seen (keyset). |
 | `POST` | `/ingest/jobs/:id/replay-failed` | Re-enqueues `FAILED` chunks, chunks stuck in `PROCESSING` past the invocation timeout, and an unfinished split. Safe in any order. |
 
 Job status: `PENDING → SPLITTING → SPLIT_DONE → COMPLETED | PARTIAL`
 (`PARTIAL` = some chunk failed after every retry; `FAILED` = the file itself
 could not be split, e.g. missing header columns). Row-level problems never
 fail a job: they are recorded in `ingest_row_errors` with the raw row and a
-path per issue.
+path per issue, and read back through `GET /ingest/jobs/:id/errors`. A queue
+that cannot take the split message answers `503` with the job id; the same
+upload again returns the job with `200` and re-offers the split.
 
 Pipeline (`npm run worker`): the splitter streams the file with `csv-parse`,
 writes chunks of `INGEST_CHUNK_SIZE` rows to storage, checkpoints after

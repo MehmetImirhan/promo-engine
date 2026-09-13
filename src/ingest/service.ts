@@ -68,6 +68,15 @@ export interface ChunkView {
   updated_at: Date;
 }
 
+/** One rejected file row: what arrived and why it was refused. */
+export interface RowErrorView {
+  row_no: number;
+  chunk_index: number;
+  sku: string | null;
+  raw: Record<string, string>;
+  errors: Array<{ path: string; message: string }>;
+}
+
 interface ChunkStatusCounts {
   status: IngestChunkStatus;
   chunks: string;
@@ -216,6 +225,22 @@ export class IngestService {
       .select(['chunk_index', 'status', 'attempts', 'row_count', 'rows_valid', 'rows_invalid', 'rows_applied', 'error', 'updated_at'])
       .where('job_id', '=', jobId)
       .orderBy('chunk_index')
+      .execute();
+  }
+
+  /**
+   * Rejected rows of one job in file order, keyset-paged on row_no. Bad
+   * rows are data (ADR §7): here is where a vendor reads them back.
+   */
+  async listRowErrors(jobId: string, limit: number, afterRowNo: number): Promise<RowErrorView[]> {
+    await this.findOrThrow(jobId);
+    return this.db
+      .selectFrom('ingest_row_errors')
+      .select(['row_no', 'chunk_index', 'sku', 'raw', 'errors'])
+      .where('job_id', '=', jobId)
+      .where('row_no', '>', afterRowNo)
+      .orderBy('row_no')
+      .limit(limit)
       .execute();
   }
 
