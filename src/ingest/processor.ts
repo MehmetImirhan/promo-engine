@@ -26,6 +26,7 @@ import type { Storage } from '../storage/index.js';
 import { checkJobCompletion } from './completion.js';
 import type { InvocationContext } from './context.js';
 import type { IngestInvalidation } from './invalidation.js';
+import { MONEY_STRING } from '../shared/money.js';
 import { DEFAULT_PRICING_RULES, priceRow, type PricingRules } from './pricing-rules.js';
 import { validateRow, type RowIssue } from './row-schema.js';
 import { sourceSeq } from './source-seq.sql.js';
@@ -212,6 +213,13 @@ export class ChunkProcessor {
       const priced = priceRow({ cost, category }, this.rules);
       if (!priced.ok) {
         invalid.push({ row_no, sku, raw, errors: [{ path: 'cost', message: priced.reason }] });
+        continue;
+      }
+      // The priced value, not the input, is what must fit numeric(12,2): a
+      // cost that fits can still price past it, and the upsert would then
+      // fail the whole chunk instead of this one row.
+      if (!MONEY_STRING.test(priced.base_price)) {
+        invalid.push({ row_no, sku, raw, errors: [{ path: 'cost', message: `priced ${priced.base_price} exceeds the maximum price` }] });
         continue;
       }
       valid.push({ row_no, sku, name, category, base_price: priced.base_price, stock_quantity });

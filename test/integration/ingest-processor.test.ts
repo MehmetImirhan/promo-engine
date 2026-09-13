@@ -181,6 +181,21 @@ describe('ChunkProcessor', () => {
     expect(await jobStatus(id)).toBe('COMPLETED');
   });
 
+  it('records a row whose priced value overflows numeric(12,2) as a row error instead of failing the chunk', async () => {
+    const good = `O-${u()}`;
+    const huge = `O-${u()}`;
+    const { id } = await splitJob(csv(`${good},Fine,Shoes,10.00,1`, `${huge},Overflow,Shoes,9999999999.00,1`));
+
+    await processor.handle({ jobId: id, chunkIndex: 0 }, ctx);
+
+    expect(await product(good)).toMatchObject({ base_price: '12.99' });
+    expect(await product(huge)).toBeUndefined();
+    const errors = await db.selectFrom('ingest_row_errors').select(['sku', 'errors']).where('job_id', '=', id).execute();
+    expect(errors).toEqual([{ sku: huge, errors: [{ path: 'cost', message: expect.stringMatching(/exceeds the maximum price/) }] }]);
+    expect(await chunk(id, 0)).toMatchObject({ status: 'DONE', rows_valid: 1, rows_invalid: 1, rows_applied: 1 });
+    expect(await jobStatus(id)).toBe('COMPLETED');
+  });
+
   it('(f) reclaims a chunk stuck in PROCESSING with a stale updated_at, but not a fresh one', async () => {
     const s = `R-${u()}`;
     const { id } = await splitJob(csv(`${s},Stuck,Shoes,10.00,1`));
