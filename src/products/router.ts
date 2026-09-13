@@ -5,6 +5,7 @@ import type { ProductsService } from './service.js';
 
 export const MAX_PAGE_SIZE = 100;
 export const DEFAULT_PAGE_SIZE = 20;
+export const MAX_SEARCH_RESULTS = 20;
 
 const idParams = z.object({ id: z.uuid() });
 
@@ -14,6 +15,12 @@ const createBody = z.strictObject({
   category_id: z.uuid(),
   base_price: moneyString,
   stock_quantity: z.number().int().min(0).default(0),
+});
+
+/** At least two characters: every search without a text index is a scan, so single keystrokes are not worth one. */
+const searchQuery = z.object({
+  q: z.string().trim().min(2).max(100),
+  limit: z.coerce.number().int().min(1).max(MAX_SEARCH_RESULTS).default(8),
 });
 
 const listQuery = z.object({
@@ -27,6 +34,10 @@ const listQuery = z.object({
 export function productsRouter(products: ProductsService): Router {
   const router = Router();
 
+  router.get('/categories', async (_req: Request, res: Response) => {
+    res.json({ items: await products.listCategories() });
+  });
+
   router.get('/products', async (req: Request, res: Response) => {
     const params = listQuery.parse(req.query);
     res.json(await products.listProducts(params));
@@ -35,6 +46,12 @@ export function productsRouter(products: ProductsService): Router {
   router.post('/products', async (req: Request, res: Response) => {
     const body = createBody.parse(req.body);
     res.status(201).json(await products.createProduct(body));
+  });
+
+  // Registered before /products/:id, which would otherwise reject "search" as a malformed uuid.
+  router.get('/products/search', async (req: Request, res: Response) => {
+    const { q, limit } = searchQuery.parse(req.query);
+    res.json({ items: await products.searchProducts(q, limit) });
   });
 
   router.get('/products/:id', async (req: Request, res: Response) => {

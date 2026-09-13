@@ -42,6 +42,20 @@ export interface ProductView {
   updated_at: string;
 }
 
+export interface CategoryView {
+  id: string;
+  name: string;
+}
+
+/** A search hit is the stored product, not the priced view: pickers need identity, not the effective price. */
+export interface ProductSearchHit {
+  id: string;
+  sku: string;
+  name: string;
+  category_id: string;
+  base_price: string;
+}
+
 export interface CreateProductInput {
   sku: string;
   name: string;
@@ -85,6 +99,11 @@ export interface ProductPage {
   items: ProductView[];
   /** Pass back as `cursor` with the same category_id and order to get the next page; null on the last page. A cursor sent with a different order or category_id is rejected with 400. */
   next_cursor: string | null;
+}
+
+/** Escape LIKE wildcards so a search for "50%" or "a_b" matches those characters literally. */
+export function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, '\\$&');
 }
 
 export function toProductView(row: PricedProduct): ProductView {
@@ -144,6 +163,29 @@ export class ProductsService {
     const row = await pricedProducts(this.db).where('p.id', '=', id).executeTakeFirst();
     if (!row) throw new NotFound(`Product ${id} not found`);
     return toProductView(row);
+  }
+
+  /** Every category, by name. Categories are created by ingest; there are few enough to return all of them. */
+  async listCategories(): Promise<CategoryView[]> {
+    return this.db.selectFrom('categories').select(['id', 'name']).orderBy('name').execute();
+  }
+
+  /**
+   * Case-insensitive substring match on SKU or name, for choosing a product
+   * by hand. There is no ORDER BY: without a trigram index this is a scan,
+   * and LIMIT lets it stop at the first matches instead of reading and
+   * sorting every candidate. A term that matches nothing reads the whole
+   * table (about 0.5 s at 540k products), which is acceptable for an
+   * operator typing into a search box and not for storefront traffic.
+   */
+  async searchProducts(term: string, limit: number): Promise<ProductSearchHit[]> {
+    const pattern = `%${escapeLike(term)}%`;
+    return this.db
+      .selectFrom('products')
+      .select(['id', 'sku', 'name', 'category_id', 'base_price'])
+      .where((eb) => eb.or([eb('sku', 'ilike', pattern), eb('name', 'ilike', pattern)]))
+      .limit(limit)
+      .execute();
   }
 
   /**

@@ -58,6 +58,8 @@ numbers for money are rejected with 400. Errors always have the shape
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET`  | `/products` | Query: `category_id` (uuid), `order` = `asc` \| `desc` (default `asc`), `limit` 1–100 (default 20), `cursor`. Sorted by `effective_price` in SQL, keyset-paginated. Response `{ items, next_cursor }`. |
+| `GET`  | `/products/search` | Query: `q` (2–100 chars, matches SKU or name, case-insensitive), `limit` 1–20 (default 8). Response `{ items: [{ id, sku, name, category_id, base_price }] }`. For picking a product by hand: unpriced, uncached, and a scan when nothing matches. |
+| `GET`  | `/categories` | Every category, `{ items: [{ id, name }] }`, sorted by name. |
 | `GET`  | `/products/:id` | Product with `effective_price` and the applied `promotion` (`{ id, name, type, value }` or `null`). |
 | `POST` | `/products` | Body `{ sku, name, category_id, base_price, stock_quantity? }` → 201 with the priced view. A product created into a category with an active promotion is returned already discounted. Duplicate SKU → 409. |
 
