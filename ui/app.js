@@ -35,7 +35,6 @@ const api = (path, { method = 'GET', json, form } = {}) =>
     body: json ? JSON.stringify(json) : form,
   });
 
-const lookup = (path) => request(`/lookup/${path}`);
 
 // ---------------------------------------------------------------------------
 // Formatting
@@ -95,14 +94,14 @@ function toast(message, { error = false, details = [] } = {}) {
 const fail = (err) => toast(err.message, { error: true, details: detailLines(err.details) });
 
 // ---------------------------------------------------------------------------
-// Categories (names come from the UI server; the API only knows ids)
+// Categories
 // ---------------------------------------------------------------------------
 
 const categories = new Map();
 
 async function loadCategories() {
   try {
-    const rows = await lookup('categories');
+    const { items: rows } = await api('/categories');
     categories.clear();
     for (const c of rows) categories.set(c.id, c.name);
     $('#category-filter').innerHTML = categoryOptions(products.category, { all: true });
@@ -226,13 +225,13 @@ function bindPicker(form) {
     clearTimeout(timer);
     timer = setTimeout(async () => {
       const q = input.value.trim();
-      if (!q) {
+      if (q.length < 2) {
         list.hidden = true;
         return;
       }
       const mine = ++seq;
       try {
-        results = await lookup(`products?q=${encodeURIComponent(q)}`);
+        ({ items: results } = await api(`/products/search?q=${encodeURIComponent(q)}`));
       } catch (err) {
         fail(err);
         return;
@@ -438,16 +437,16 @@ const promotions = new Map();
 
 function promotionRow(pr) {
   const target = pr.product_id
-    ? `<div class="title">${esc(pr.product_name)}</div><div class="sub mono">${esc(pr.product_sku)}</div>`
-    : `<div class="title">${esc(pr.category_name)}</div><div class="sub">Entire category</div>`;
-  const live = pr.state === 'ACTIVE' || pr.state === 'SCHEDULED';
+    ? `<div class="title">${esc(pr.product?.name)}</div><div class="sub mono">${esc(pr.product?.sku)}</div>`
+    : `<div class="title">${esc(pr.category?.name)}</div><div class="sub">Entire category</div>`;
+  const live = pr.effective_status === 'ACTIVE' || pr.effective_status === 'SCHEDULED';
   return `
     <tr>
       <td><div class="title">${esc(pr.name)}</div><div class="sub">${pr.product_id ? 'Product' : 'Category'} scope</div></td>
       <td>${target}</td>
       <td><span class="badge success">${esc(fmtDiscount(pr.discount_type, pr.value))}</span></td>
       <td class="hide-sm"><div class="sub nowrap">${esc(fmtDate(pr.starts_at))} – ${esc(fmtDate(pr.ends_at))}</div></td>
-      <td>${statusBadge(pr.state)}</td>
+      <td>${statusBadge(pr.effective_status)}</td>
       <td class="actions">${live ? `<button class="btn ghost sm" type="button" data-assign="${esc(pr.id)}">Assign</button><button class="btn ghost sm danger" type="button" data-cancel="${esc(pr.id)}">Cancel</button>` : ''}</td>
     </tr>`;
 }
@@ -456,7 +455,7 @@ async function loadPromotions() {
   const body = $('#promotions-body');
   if (promotions.size === 0) body.innerHTML = skeletonRows(5, ['', '', '', 'hide-sm', '', '']);
   try {
-    const rows = await lookup('promotions');
+    const { items: rows } = await api('/promotions?limit=100');
     promotions.clear();
     for (const r of rows) promotions.set(r.id, r);
     body.innerHTML = rows.map(promotionRow).join('');
@@ -659,13 +658,12 @@ async function refreshIngest() {
   const body = $('#jobs-body');
   if (!body.children.length) body.innerHTML = skeletonRows(3, ['', '', '', 'hide-sm']);
   try {
-    const ids = await lookup('jobs');
-    const jobs = await Promise.all(ids.map(({ id }) => api(`/ingest/jobs/${id}`)));
+    const { items: jobs } = await api('/ingest/jobs?limit=8');
     ingest.selected ??= jobs[0]?.id ?? null;
     const selected = ingest.selected
       ? jobs.find((j) => j.id === ingest.selected) ?? (await api(`/ingest/jobs/${ingest.selected}`))
       : null;
-    const chunks = selected ? await lookup(`chunks?job=${selected.id}`) : [];
+    const chunks = selected ? (await api(`/ingest/jobs/${selected.id}/chunks`)).items : [];
     if (run !== ingest.run) return;
 
     body.innerHTML = jobs.map(jobRow).join('');
