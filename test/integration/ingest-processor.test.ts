@@ -218,6 +218,25 @@ describe('ChunkProcessor', () => {
     expect(await jobStatus(id)).toBe('COMPLETED');
   });
 
+  it('reclaiming a chunk the first worker already finished duplicates neither products nor row errors', async () => {
+    const good = `T-${u()}`;
+    const bad = `T-${u()}`;
+    const { id } = await splitJob(csv(`${good},Twice,Shoes,10.00,1`, `${bad},Bad,Shoes,ten,1`));
+    await processor.handle({ jobId: id, chunkIndex: 0 }, ctx);
+
+    // The first worker was slow, not dead: its DONE row is made to look like a stale claim and run again.
+    await db
+      .updateTable('ingest_chunks')
+      .set({ status: 'PROCESSING', updated_at: sql`now() - make_interval(secs => ${(STALE_MS * 2) / 1000})` })
+      .where('job_id', '=', id)
+      .execute();
+    await processor.handle({ jobId: id, chunkIndex: 0 }, ctx);
+
+    const errors = await db.selectFrom('ingest_row_errors').select('sku').where('job_id', '=', id).execute();
+    expect(errors).toEqual([{ sku: bad }]);
+    expect(await chunk(id, 0)).toMatchObject({ status: 'DONE', attempts: 2, rows_invalid: 1, rows_applied: 0 });
+  });
+
   it('ignores a duplicate delivery for a DONE chunk', async () => {
     const s = `D-${u()}`;
     const { id } = await splitJob(csv(`${s},Once,Shoes,10.00,1`));

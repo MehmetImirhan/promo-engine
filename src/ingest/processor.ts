@@ -255,6 +255,8 @@ async function recordRowErrors(db: Db, jobId: string, chunkIndex: number, rows: 
         errors: JSON.stringify(r.errors),
       })),
     )
+    // A chunk run twice (stale reclaim of a slow worker) reports the same rows again.
+    .onConflict((oc) => oc.columns(['job_id', 'row_no']).doNothing())
     .execute();
 }
 
