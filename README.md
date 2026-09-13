@@ -19,6 +19,11 @@ npm run dev
 Optional: `cp .env.example .env` to change ports or credentials. Every variable
 has a default that matches `docker-compose.yml`.
 
+Optional: `npm run ui` serves a small web UI on http://localhost:5173 for
+browsing products, managing promotions and uploading vendor files. It is a
+static page plus a proxy to the API; nothing in the backend build, the tests
+or the commands above depends on the `ui/` directory.
+
 ## Scripts
 
 | Script              | What it does                                   |
@@ -33,7 +38,7 @@ has a default that matches `docker-compose.yml`.
 | `npm run ingest:generate` | Vendor CSV with realistic mess: `-- --rows N --out file [--seed S]` |
 | `npm run ingest:measure`  | 500k-row ingest under a 128 MB heap; prints wall time, RSS, continuations |
 | `npm run load`            | Flash-sale load test (ADR §4/§6): 50k-product category, listing + detail traffic, promotion created mid-run; `-- --single-flight off` for the comparison |
-| `npm run ui`              | Web UI on http://localhost:5173 (API on 3000 must be running; everything goes through the API): products, promotions, ingest upload with live chunk progress |
+| `npm run ui`              | Optional web UI on http://localhost:5173 (API on 3000 must be running; everything goes through the API): products, promotions, ingest upload with live chunk progress |
 
 ## Tests
 
@@ -51,7 +56,11 @@ the setup refuses to run if the two URLs are equal.
 All money fields (`base_price`, `effective_price`, promotion `value`) are
 decimal strings such as `"19.99"`, in requests and responses alike. JSON
 numbers for money are rejected with 400. Errors always have the shape
-`{ "error": { "code", "message", "details?" }, "requestId" }`.
+`{ "error": { "code", "message", "details?" }, "requestId" }` with `code` one
+of `VALIDATION_ERROR` (400), `BAD_REQUEST` (400, malformed JSON body),
+`NOT_FOUND` (404), `CONFLICT` (409), `SERVICE_UNAVAILABLE` (503, ingest queue
+unreachable) or `INTERNAL_ERROR` (500); `requestId` echoes an incoming
+`x-request-id` header or is generated.
 
 ### Products
 
@@ -120,7 +129,10 @@ Redis. Every key embeds its category's version (`catver:{categoryId}`, and
 assign, `POST /products`, and ingest job completion each do one `INCR`;
 nothing is ever deleted or scanned, and the old keys expire on their own.
 Concurrent misses for one key run one query (in-process single-flight).
-Every Redis error fails open to Postgres, including the version read.
+Every Redis error fails open to Postgres, including the version read: a
+connection refused, a command that takes longer than 500 ms, or a cached
+entry that does not parse all serve the request from Postgres and log once
+per outage. `GET /ready` reports `redis: down` meanwhile.
 `CACHE_ENABLED=false` bypasses Redis entirely; `CACHE_SINGLE_FLIGHT=false`
 exists only for the measurement in the ADR.
 
@@ -139,7 +151,7 @@ that would land below cost are rejected as row errors).
 | `GET`  | `/ingest/jobs/:id` | `status`, `split_invocations`, `chunks` by status, `rows` `{ total, valid, invalid, applied }`, `error_count`. |
 | `GET`  | `/ingest/jobs/:id/chunks` | Every chunk in order: `{ items: [{ chunk_index, status, attempts, row_count, rows_valid, rows_invalid, rows_applied, error, updated_at }] }`. Unpaginated: a 500k-row file is 500 chunks. |
 | `GET`  | `/ingest/jobs/:id/errors` | Rejected rows in file order: `{ items: [{ row_no, chunk_index, sku, raw, errors: [{ path, message }] }] }`. Query: `limit` 1–500 (default 100), `after` = last `row_no` seen (keyset). |
-| `POST` | `/ingest/jobs/:id/replay-failed` | Re-enqueues `FAILED` chunks, chunks stuck in `PROCESSING` past the invocation timeout, and an unfinished split. Safe in any order. |
+| `POST` | `/ingest/jobs/:id/replay-failed` | Re-enqueues `FAILED` chunks, chunks stuck in `PROCESSING` past the invocation timeout, and an unfinished split, removing each stale queue record first; a `PARTIAL` job returns to `SPLIT_DONE` only once every message is queued. Response `{ job_id, replayed_chunks, split_reenqueued }`. Safe in any order. |
 
 Job status: `PENDING → SPLITTING → SPLIT_DONE → COMPLETED | PARTIAL`
 (`PARTIAL` = some chunk failed after every retry; `FAILED` = the file itself
@@ -168,4 +180,5 @@ npm run ingest:generate -- --rows 20000 --out data/vendor.csv
 npm run worker                                   # in a second terminal
 curl -F vendor_id=acme -F file=@data/vendor.csv localhost:3000/ingest/jobs
 curl localhost:3000/ingest/jobs/<id>
+curl localhost:3000/ingest/jobs/<id>/errors           # the generated file has malformed rows
 ```

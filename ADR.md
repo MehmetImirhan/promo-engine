@@ -137,6 +137,11 @@ same-scope, precedence for cross-scope.
   effective price computation floors at zero (`GREATEST(0, ...)`) as
   defense-in-depth.
 - Percentage discounts round half-up to 2dp.
+- A promotion can be re-targeted (`POST /promotions/:id/assign`) in one
+  `UPDATE` of its scope columns. The EXCLUDE constraints validate the new
+  target exactly as they validate an insert (overlap → 409), the product-scope
+  FIXED rule above is re-checked against the new product, and a cancelled
+  promotion cannot be assigned (409): cancellation is final, create a new one.
 
 ---
 
@@ -301,9 +306,10 @@ version; every known write path does, so the TTL is a safety net, not the
 invalidation mechanism.
 
 **Invalidation without a 50k-key delete.** Each category has a version counter
-in Redis (`catver:{categoryId}`). Creating or cancelling a promotion, creating
-or updating a product through the API, or completing an ingest job that touched
-the category increments the counter — one `INCR`. Ingest deliberately bumps
+in Redis (`catver:{categoryId}`). Creating, cancelling or assigning a promotion
+(assign bumps the category it left and the one it landed in), creating a
+product through the API, or completing an ingest job that touched the category
+increments the counter — one `INCR` each. Ingest deliberately bumps
 once per affected category at job completion, never per row, and only for
 categories in which at least one price actually changed (§7). Product keys are
 never deleted individually or enumerated (`SCAN`/`KEYS`). Every key containing
@@ -324,7 +330,10 @@ previous category, and a move bumps both. The unfiltered listing keys on
 
 **Fail-open, including the version read.** Every Redis touch — version
 read, GET, SET, INCR — is caught; the request is served from Postgres and
-the outage is logged once per transition, not per request. Single-flight
+the outage is logged once per transition, not per request. "Down" is not
+the only failure: the client carries a 500 ms `commandTimeout`, so a Redis
+that accepts connections but stalls fails open too, and a cached entry that
+does not parse is treated as a miss and overwritten, never surfaced. Single-flight
 still applies while Redis is down, so a Redis outage during a sale does not
 become a Postgres stampede. Redis is a latency optimization, never a
 dependency for correctness.
@@ -423,19 +432,20 @@ and computed with `decimal.js`. They are the reason ingest cannot be a
 
 | Failure | Handling |
 |---------|----------|
-| Splitter times out or crashes mid-file | Checkpoint `next_chunk_index` persisted every N chunks; on resume the splitter streams from the start of the file and skips `next_chunk_index × CHUNK_SIZE` records through the parser (byte offsets are not safe resume points in CSV: they can land inside a multi-byte character or a quoted field); deterministic chunk filenames make rewrites idempotent; splitter checks remaining time and re-enqueues itself before the limit — any invocation is bounded and a retry costs at most one re-read of the file |
-| Chunk processed twice (splitter retry re-enqueues) | `ingest_chunks (job_id, chunk_index)` PK; processor's first statement is `UPDATE ... SET status='PROCESSING', attempts = attempts + 1 WHERE status IN ('PENDING','FAILED')`; zero rows → already handled, exit |
-| Processor crashes mid-chunk, leaving the row `PROCESSING` | On any thrown error the processor sets `status='FAILED'` in a separate statement outside the failed transaction, then rethrows so the queue retry can reclaim. For hard crashes where even that does not run, `POST /ingest/jobs/:id/replay-failed` also re-enqueues `PROCESSING` rows whose `updated_at` is older than the invocation timeout; the processor's claim statement makes a double replay harmless |
-| Completion detected too early (processors finish before splitter sets total) | No counter. Job is complete when splitter status is `SPLIT_DONE` **and** no chunk is non-DONE; checked by whichever finishes last |
+| Splitter times out or crashes mid-file | Checkpoint `next_chunk_index` persisted after every chunk (`GREATEST`, so two overlapping runs never move it backwards); on resume the splitter streams from the start of the file and skips `next_chunk_index × CHUNK_SIZE` records through the parser (byte offsets are not safe resume points in CSV: they can land inside a multi-byte character or a quoted field); deterministic chunk filenames make rewrites idempotent; splitter checks remaining time and re-enqueues itself before the limit — any invocation is bounded and a retry costs at most one re-read of the file |
+| Chunk processed twice (splitter retry re-enqueues, or a stale reclaim of a worker that was slow rather than dead) | `ingest_chunks (job_id, chunk_index)` PK; processor's first statement is `UPDATE ... SET status='PROCESSING', attempts = attempts + 1 WHERE status IN ('PENDING','FAILED') OR (status = 'PROCESSING' AND updated_at < now() - invocation_timeout)`; zero rows → already handled, exit. If both runs do get through, the upsert is a no-op on equal `source_seq` and row errors are `ON CONFLICT (job_id, row_no) DO NOTHING`, so the second run changes nothing |
+| Processor crashes mid-chunk, leaving the row `PROCESSING` | On any thrown error the processor sets `status='FAILED'` in a separate statement outside the failed transaction, then rethrows so the queue retry can reclaim. For hard crashes where even that does not run, `POST /ingest/jobs/:id/replay-failed` also re-enqueues `PROCESSING` rows whose `updated_at` is older than the invocation timeout; the processor's claim statement makes a double replay harmless. Replay removes the queue record before re-adding it (BullMQ ignores an add whose id exists in any state, including the failed set; SQS FIFO deduplicates the same way), resets each queued chunk from `FAILED` to `PENDING`, flips the job from `PARTIAL` back to `SPLIT_DONE` only after every enqueue succeeded, and runs the completion check itself |
+| Completion detected too early (processors finish before splitter sets total) | No counter. Job is complete when splitter status is `SPLIT_DONE` **and** no chunk is non-DONE; checked by whichever finishes last: the splitter at `SPLIT_DONE`, every processor after `DONE` or `FAILED`, and the replay endpoint after its flip |
 | Same SKU appears twice in one file, chunks land out of order, or a DLQ'd chunk is replayed later | Monotonic `source_seq = (job_seq << 32) \| row_no` on every row; `ON CONFLICT (sku) DO UPDATE ... WHERE EXCLUDED.source_seq > products.source_seq`. Newest wins in any order; an old job's replay can never overwrite a newer job's data |
 | Concurrent multi-row upserts deadlock | Every batch is `ORDER BY sku` before upsert — deterministic lock order |
 | Same SKU twice in one chunk | Postgres rejects an `ON CONFLICT DO UPDATE` that touches one row twice, so the processor keeps only the highest `row_no` per SKU before the upsert — the same newest-wins rule `source_seq` applies across chunks |
 | Chunk size vs. SQL parameter limits | Not a constraint: the upsert passes one array per column (`unnest`), so its parameter count is constant. `INGEST_CHUNK_SIZE` (max 10,000) is a memory bound — one chunk is what a splitter or processor invocation holds |
-| One malformed row poisons a 1,000-row chunk | Validate first; partition valid/invalid; upsert valid; record invalid in `ingest_row_errors`. Row errors are data, not exceptions |
+| One malformed row poisons a 1,000-row chunk | Validate first; partition valid/invalid; upsert valid; record invalid in `ingest_row_errors`. The bound applies to the *priced* value too: a cost that fits the schema can still price past `numeric(12,2)`, and that row is an error, not a failed upsert. Row errors are data, not exceptions, and are read back through `GET /ingest/jobs/:id/errors` |
 | Two processors create the same new category | `INSERT ... ON CONFLICT (name) DO NOTHING` then select |
 | 500 chunks fan out to 500 DB connections | The queue is the throttle: worker concurrency cap locally; reserved concurrency + RDS Proxy/PgBouncer in production |
 | Stale cache after prices change | `RETURNING category_id, OLD.base_price IS DISTINCT FROM NEW.base_price` (Postgres 18) from the upsert tells the processor which categories had a real price change; those categories are bumped once each at job completion. No per-row or per-SKU cache writes |
 | Vendor re-uploads the same file | `UNIQUE (vendor_id, file_checksum)`; re-POST returns the existing job |
+| Queue unreachable when the upload arrives | The queue is a hard dependency for ingest, not a fail-open one: the API's producer connection has no offline queue, so the enqueue rejects at once and the handler answers `503` naming the job it already recorded. The same upload again returns that job with `200` and re-offers the split. An upload must never wait in an offline queue and run later |
 | Float precision | Prices parsed as strings into `numeric`; no `parseFloat` anywhere in the pipeline |
 
 ### Local ↔ production mapping
@@ -446,7 +456,7 @@ and computed with `decimal.js`. They are the reason ingest cannot be a
 | Splitter trigger | BullMQ `split` job | Lambda on `S3:ObjectCreated` |
 | Queue | BullMQ on Redis | SQS with redrive policy → DLQ |
 | Processor | `npm run worker` (concurrency-capped) | Lambda with SQS event source mapping, reserved concurrency |
-| DLQ replay | `POST /ingest/jobs/:id/replay-failed` | SQS redrive to source |
+| DLQ replay | `POST /ingest/jobs/:id/replay-failed` (remove + re-add by message id) | SQS redrive to source |
 
 The pipeline code is identical in both modes; only the adapters differ.
 
