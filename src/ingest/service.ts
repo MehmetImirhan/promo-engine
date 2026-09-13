@@ -11,6 +11,8 @@ import type { Db, IngestChunkStatus, IngestJob } from '../db/index.js';
 import { messageIds, type IngestQueues } from '../queue/index.js';
 import { NotFound } from '../shared/errors.js';
 import type { Storage } from '../storage/index.js';
+import { checkJobCompletion } from './completion.js';
+import type { IngestInvalidation } from './invalidation.js';
 
 export interface Upload {
   fileKey: string;
@@ -50,6 +52,8 @@ export interface ReplayResult {
 export interface IngestServiceOptions {
   /** Same value the processor uses to reclaim PROCESSING chunks. */
   staleAfterMs: number;
+  /** Same value the completion check uses to tell a terminal FAILED chunk from a retryable one. */
+  maxAttempts: number;
 }
 
 export interface ChunkView {
@@ -110,6 +114,7 @@ export class IngestService {
     private readonly db: Db,
     private readonly storage: Storage,
     private readonly queues: IngestQueues,
+    private readonly invalidation: IngestInvalidation,
     private readonly options: IngestServiceOptions,
   ) {}
 
@@ -235,8 +240,21 @@ export class IngestService {
   /**
    * Re-enqueue every chunk that is FAILED or has sat in PROCESSING longer
    * than the invocation timeout, and an unfinished split. The processor's
-   * claim statement and source_seq make any replay safe in any order; a
-   * PARTIAL job goes back to SPLIT_DONE so the completion check can fire.
+   * claim statement and source_seq make any replay safe in any order.
+   *
+   * Each message is removed before it is enqueued: a driver that keys
+   * messages by id (BullMQ here, SQS FIFO in production) ignores an add
+   * whose id still exists, and an exhausted delivery's record does still
+   * exist, in the failed set. Without the remove, the replay reports the
+   * chunk and nothing runs.
+   *
+   * Once queued, a FAILED chunk goes back to PENDING so the derived
+   * completion check counts it as outstanding again (a FAILED chunk at max
+   * attempts reads as terminal). A PARTIAL job goes back to SPLIT_DONE only
+   * after every enqueue succeeded, so a throw mid-loop leaves it PARTIAL and
+   * replayable rather than SPLIT_DONE with nothing queued. The completion
+   * check then runs here too: a fast worker may finish a replayed chunk
+   * before the flip, and its own check finds no SPLIT_DONE job to complete.
    */
   async replayFailed(jobId: string): Promise<ReplayResult> {
     const job = await this.findOrThrow(jobId);
@@ -257,6 +275,28 @@ export class IngestService {
       .orderBy('chunk_index')
       .execute();
 
+    for (const { chunk_index } of stuck) {
+      const id = messageIds.chunk(jobId, chunk_index);
+      await this.queues.deadLetter.remove(id);
+      await this.queues.processChunk.remove(id);
+      await this.queues.processChunk.enqueue({ jobId, chunkIndex: chunk_index }, { id });
+      // After the enqueue, never before: a chunk reset without a message would not be found by the next replay.
+      await this.db
+        .updateTable('ingest_chunks')
+        .set({ status: 'PENDING', updated_at: sql`now()` })
+        .where('job_id', '=', jobId)
+        .where('chunk_index', '=', chunk_index)
+        .where('status', '=', 'FAILED')
+        .execute();
+    }
+
+    const splitUnfinished = job.status === 'PENDING' || job.status === 'SPLITTING';
+    if (splitUnfinished) {
+      const id = messageIds.split(jobId, job.next_chunk_index);
+      await this.queues.split.remove(id);
+      await this.queues.split.enqueue({ jobId }, { id });
+    }
+
     if (job.status === 'PARTIAL') {
       await this.db
         .updateTable('ingest_jobs')
@@ -264,17 +304,8 @@ export class IngestService {
         .where('id', '=', jobId)
         .where('status', '=', 'PARTIAL')
         .execute();
-    }
-
-    for (const { chunk_index } of stuck) {
-      const id = messageIds.chunk(jobId, chunk_index);
-      await this.queues.deadLetter.remove(id);
-      await this.queues.processChunk.enqueue({ jobId, chunkIndex: chunk_index }, { id });
-    }
-
-    const splitUnfinished = job.status === 'PENDING' || job.status === 'SPLITTING';
-    if (splitUnfinished) {
-      await this.queues.split.enqueue({ jobId }, { id: messageIds.split(jobId, job.next_chunk_index) });
+      const final = await checkJobCompletion(this.db, jobId, this.options.maxAttempts);
+      if (final !== null) await this.invalidation.afterJobFinished(jobId);
     }
 
     return { job_id: jobId, replayed_chunks: stuck.map((c) => c.chunk_index), split_reenqueued: splitUnfinished };

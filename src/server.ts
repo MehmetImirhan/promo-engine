@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     logger,
     storage,
     queues,
-    ingest: { staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS },
+    ingest: { staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS, maxAttempts: env.INGEST_MAX_ATTEMPTS },
   });
   const server: Server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, 'api listening');

@@ -190,6 +190,39 @@ describe('POST /ingest/jobs/:id/replay-failed', () => {
     expect(status.body).toMatchObject({ status: 'COMPLETED', chunks: { DONE: 3, FAILED: 0, PROCESSING: 0 }, rows: { applied: 9 } });
   });
 
+  it('leaves a PARTIAL job PARTIAL when an enqueue throws mid-replay, so a second replay still works', async () => {
+    const res = await app.upload<CreatedBody>('/ingest/jobs', {
+      fields: { vendor_id: `vendor-${randomUUID().slice(0, 8)}` },
+      file: { name: 'v.csv', content: messyCsv(3) },
+    });
+    const id = res.body.id;
+    await app.ingest.splitQueue.drain((d) => splitter.handle(d.payload, ctx));
+    await app.ingest.chunkQueue.drain(async () => undefined); // never processed
+    await app.db
+      .updateTable('ingest_chunks')
+      .set({ status: 'FAILED', attempts: env.INGEST_MAX_ATTEMPTS, error: 'poison' })
+      .where('job_id', '=', id)
+      .execute();
+    await app.db.updateTable('ingest_jobs').set({ status: 'PARTIAL', completed_at: new Date() }).where('id', '=', id).execute();
+
+    const queue = app.ingest.chunkQueue;
+    const enqueue = queue.enqueue.bind(queue);
+    queue.enqueue = async () => {
+      throw new Error('queue down');
+    };
+    try {
+      expect((await app.post(`/ingest/jobs/${id}/replay-failed`)).status).toBe(500);
+    } finally {
+      queue.enqueue = enqueue;
+    }
+    expect((await app.get<JobStatusView>(`/ingest/jobs/${id}`)).body.status).toBe('PARTIAL');
+
+    const replay = await app.post<ReplayResult>(`/ingest/jobs/${id}/replay-failed`);
+    expect(replay.body).toMatchObject({ replayed_chunks: [0], split_reenqueued: false });
+    await app.ingest.chunkQueue.drain((d) => processor.handle(d.payload, ctx));
+    expect((await app.get<JobStatusView>(`/ingest/jobs/${id}`)).body.status).toBe('COMPLETED');
+  });
+
   it('re-enqueues the split for a job whose splitter never finished', async () => {
     const res = await app.upload<CreatedBody>('/ingest/jobs', {
       fields: { vendor_id: `vendor-${randomUUID().slice(0, 8)}` },

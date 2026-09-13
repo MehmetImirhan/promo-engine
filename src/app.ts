@@ -4,6 +4,7 @@ import { pinoHttp } from 'pino-http';
 import type { Cache, Redis } from './cache/index.js';
 import type { Db, Pool } from './db/index.js';
 import { ingestRouter } from './ingest/router.js';
+import { IngestInvalidation } from './ingest/invalidation.js';
 import { IngestService, type IngestServiceOptions } from './ingest/service.js';
 import { productsRouter } from './products/router.js';
 import { ProductsService } from './products/service.js';
@@ -80,7 +81,7 @@ export function createApp({ pool, db, redis, cache, logger, storage, queues, ing
 
   app.use(productsRouter(new ProductsService(db, cache)));
   app.use(promotionsRouter(new PromotionsService(db, cache.versions)));
-  app.use(ingestRouter(new IngestService(db, storage, queues, ingest)));
+  app.use(ingestRouter(new IngestService(db, storage, queues, new IngestInvalidation(db, cache.versions), ingest)));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

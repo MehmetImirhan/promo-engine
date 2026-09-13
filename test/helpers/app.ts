@@ -56,7 +56,7 @@ export async function startTestApp(options: TestAppOptions = {}): Promise<TestAp
     logger,
     storage: ingest.storage,
     queues: { split: ingest.splitQueue, processChunk: ingest.chunkQueue, deadLetter: ingest.dlq },
-    ingest: { staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS },
+    ingest: { staleAfterMs: env.INGEST_INVOCATION_TIMEOUT_MS, maxAttempts: env.INGEST_MAX_ATTEMPTS },
   });
   const server = await new Promise<import('node:http').Server>((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
