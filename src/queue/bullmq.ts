@@ -22,13 +22,26 @@ export interface BullmqQueueOptions<T> {
   prefix?: string;
 }
 
+export type QueueRole = 'producer' | 'consumer';
+
 /**
  * BullMQ requires `maxRetriesPerRequest: null` on its connections; the
  * cache client (src/cache/redis.ts) deliberately does not have that, so the
- * worker gets its own connection.
+ * queues get their own connection.
+ *
+ * A producer (the API, which only enqueues) disables the offline queue so
+ * an add during a Redis outage rejects at once instead of parking until
+ * Redis returns; the queue is a hard dependency for ingest, and a request
+ * that hangs and then runs anyway is the worst of the outcomes. A consumer
+ * keeps the default, as BullMQ workers rely on the offline queue to ride
+ * out a reconnect.
  */
-export function createQueueConnection(url: string): Redis {
-  return new Redis(url, { maxRetriesPerRequest: null, enableReadyCheck: false });
+export function createQueueConnection(url: string, role: QueueRole = 'consumer'): Redis {
+  return new Redis(url, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+    enableOfflineQueue: role === 'consumer',
+  });
 }
 
 export class BullmqQueue<T> implements Queue<T> {

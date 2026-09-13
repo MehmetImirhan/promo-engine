@@ -29,3 +29,9 @@ export class Validation extends AppError {
   readonly status = 400;
   readonly code = 'VALIDATION_ERROR';
 }
+
+/** A hard dependency (the ingest queue) did not answer; the request can be retried as-is. */
+export class Unavailable extends AppError {
+  readonly status = 503;
+  readonly code = 'SERVICE_UNAVAILABLE';
+}

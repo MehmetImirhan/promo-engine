@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   });
 
   // Ingest: the API only enqueues; src/worker.ts consumes.
-  const queueConnection = createQueueConnection(env.REDIS_URL);
+  const queueConnection = createQueueConnection(env.REDIS_URL, 'producer');
   queueConnection.on('error', (err) => logger.warn({ err: err.message }, 'queue redis connection error'));
   const queues = createIngestQueues({
     connection: queueConnection,

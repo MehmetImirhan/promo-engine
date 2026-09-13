@@ -102,6 +102,30 @@ describe('POST /ingest/jobs', () => {
     expect(noVendor.body.error.details).toEqual([{ path: 'vendor_id', message: expect.any(String) }]);
   });
 
+  it('503 with the job id when the queue rejects the split, and the same upload afterwards re-offers it', async () => {
+    const vendorDown = `vendor-${randomUUID().slice(0, 8)}`;
+    const queue = app.ingest.splitQueue;
+    const enqueue = queue.enqueue.bind(queue);
+    queue.enqueue = async () => {
+      throw new Error("Stream isn't writeable and enableOfflineQueue options is false");
+    };
+    let res: Awaited<ReturnType<typeof app.upload<ErrorBody & { error: { details: { job_id: string } } }>>>;
+    try {
+      res = await app.upload('/ingest/jobs', { fields: { vendor_id: vendorDown }, file: { name: 'v.csv', content: csv } });
+    } finally {
+      queue.enqueue = enqueue;
+    }
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatchObject({ code: 'SERVICE_UNAVAILABLE', details: { job_id: expect.any(String) } });
+    const jobId = res.body.error.details.job_id;
+    expect(await app.db.selectFrom('ingest_jobs').select('status').where('id', '=', jobId).executeTakeFirst()).toEqual({ status: 'PENDING' });
+
+    const again = await app.upload<CreatedBody>('/ingest/jobs', { fields: { vendor_id: vendorDown }, file: { name: 'v.csv', content: csv } });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ id: jobId, created: false });
+    expect(app.ingest.splitQueue.enqueued.at(-1)).toEqual({ id: `split:${jobId}:0`, payload: { jobId } });
+  });
+
   it('400 for a non-multipart body', async () => {
     const res = await app.post<ErrorBody>('/ingest/jobs', { vendor_id: vendor });
     expect(res.status).toBe(400);

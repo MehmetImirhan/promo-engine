@@ -9,7 +9,7 @@ import { Transform, type Readable } from 'node:stream';
 import { sql } from 'kysely';
 import type { Db, IngestChunkStatus, IngestJob } from '../db/index.js';
 import { messageIds, type IngestQueues } from '../queue/index.js';
-import { NotFound } from '../shared/errors.js';
+import { NotFound, Unavailable } from '../shared/errors.js';
 import type { Storage } from '../storage/index.js';
 import { checkJobCompletion } from './completion.js';
 import type { IngestInvalidation } from './invalidation.js';
@@ -149,6 +149,10 @@ export class IngestService {
    * the same file returns the existing job and drops the duplicate bytes.
    * The split message is enqueued only after the row exists, and the
    * response is sent only after the enqueue: nothing runs after the reply.
+   *
+   * A queue that cannot take the message is a 503, not a hang and not a
+   * 500: the job row and file are already in place, so the same upload
+   * again returns them with 200 and re-offers the split.
    */
   async createJob(vendorId: string, upload: Upload): Promise<CreateJobResult> {
     const inserted = await this.db
@@ -159,7 +163,7 @@ export class IngestService {
       .executeTakeFirst();
 
     if (inserted) {
-      await this.queues.split.enqueue({ jobId: inserted.id }, { id: messageIds.split(inserted.id, 0) });
+      await this.enqueueSplit(inserted.id, 0);
       return { job: inserted, created: true };
     }
 
@@ -173,9 +177,20 @@ export class IngestService {
 
     // A job whose split message was lost (enqueue failed after insert) gets it again; the id dedupes otherwise.
     if (existing.status === 'PENDING') {
-      await this.queues.split.enqueue({ jobId: existing.id }, { id: messageIds.split(existing.id, 0) });
+      await this.enqueueSplit(existing.id, 0);
     }
     return { job: existing, created: false };
+  }
+
+  private async enqueueSplit(jobId: string, fromChunk: number): Promise<void> {
+    try {
+      await this.queues.split.enqueue({ jobId }, { id: messageIds.split(jobId, fromChunk) });
+    } catch (err) {
+      throw new Unavailable('Ingest queue is unavailable; the job is recorded and the same upload can be retried', {
+        job_id: jobId,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   async getStatus(jobId: string): Promise<JobStatusView> {
