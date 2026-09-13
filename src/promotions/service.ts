@@ -17,6 +17,17 @@ import type { AssignPromotionBody, CreatePromotionBody } from './schemas.js';
 
 type Scope = AssignPromotionBody;
 
+/** `status` as stored, evaluated against now(): an ACTIVE row outside its window is SCHEDULED or ENDED. */
+export type EffectiveStatus = 'SCHEDULED' | 'ACTIVE' | 'ENDED' | 'CANCELLED';
+
+export interface PromotionListItem extends Promotion {
+  effective_status: EffectiveStatus;
+  /** The target, named: set for product scope. */
+  product: { id: string; sku: string; name: string; category_id: string } | null;
+  /** The target, named: set for category scope. */
+  category: { id: string; name: string } | null;
+}
+
 const CONSTRAINTS: ConstraintMessages = {
   promotions_product_id_fkey: { path: 'product_id', message: 'Unknown product_id' },
   promotions_category_id_fkey: { path: 'category_id', message: 'Unknown category_id' },
@@ -72,11 +83,60 @@ function mapWriteError(err: unknown, scope: Scope, window: { starts_at: unknown;
   return translateIntegrityError(err, CONSTRAINTS);
 }
 
+type ListRow = Promotion & {
+  product_sku: string | null;
+  product_name: string | null;
+  product_category_id: string | null;
+  category_name: string | null;
+  effective_status: EffectiveStatus;
+};
+
+function toListItem({ product_sku, product_name, product_category_id, category_name, ...promotion }: ListRow): PromotionListItem {
+  return {
+    ...promotion,
+    product:
+      promotion.product_id !== null && product_sku !== null && product_name !== null && product_category_id !== null
+        ? { id: promotion.product_id, sku: product_sku, name: product_name, category_id: product_category_id }
+        : null,
+    category:
+      promotion.category_id !== null && category_name !== null ? { id: promotion.category_id, name: category_name } : null,
+  };
+}
+
 export class PromotionsService {
   constructor(
     private readonly db: Db,
     private readonly versions: CategoryVersions,
   ) {}
+
+  /**
+   * Newest first. Ordered by id, which is uuidv7 and therefore creation
+   * order, so the primary key index serves the sort. The active window is
+   * [starts_at, ends_at), the same half-open range the effective-price
+   * query tests with `@> now()`.
+   */
+  async list(limit: number): Promise<PromotionListItem[]> {
+    const rows = await this.db
+      .selectFrom('promotions as pr')
+      .leftJoin('products as p', 'p.id', 'pr.product_id')
+      .leftJoin('categories as c', 'c.id', 'pr.category_id')
+      .selectAll('pr')
+      .select([
+        'p.sku as product_sku',
+        'p.name as product_name',
+        'p.category_id as product_category_id',
+        'c.name as category_name',
+        sql<EffectiveStatus>`CASE
+          WHEN pr.status = 'CANCELLED' THEN 'CANCELLED'
+          WHEN now() < pr.starts_at    THEN 'SCHEDULED'
+          WHEN now() >= pr.ends_at     THEN 'ENDED'
+          ELSE 'ACTIVE' END`.as('effective_status'),
+      ])
+      .orderBy('pr.id', 'desc')
+      .limit(limit)
+      .execute();
+    return rows.map(toListItem);
+  }
 
   /** One INSERT, one bump. Category scope never iterates products (ADR §4). */
   async create(input: CreatePromotionBody): Promise<Promotion> {

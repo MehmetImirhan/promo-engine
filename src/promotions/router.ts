@@ -1,10 +1,15 @@
 import { Router, type Request, type Response } from 'express';
-import { assignPromotionBody, createPromotionBody, idParams } from './schemas.js';
+import { assignPromotionBody, createPromotionBody, idParams, listPromotionsQuery } from './schemas.js';
 import type { PromotionsService } from './service.js';
 
 /** Thin handlers: parse → service → JSON. Errors go to the middleware. */
 export function promotionsRouter(promotions: PromotionsService): Router {
   const router = Router();
+
+  router.get('/promotions', async (req: Request, res: Response) => {
+    const { limit } = listPromotionsQuery.parse(req.query);
+    res.json({ items: await promotions.list(limit) });
+  });
 
   router.post('/promotions', async (req: Request, res: Response) => {
     const body = createPromotionBody.parse(req.body);

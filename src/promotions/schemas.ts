@@ -42,3 +42,9 @@ export const assignPromotionBody = z.strictObject(scopeFields).superRefine(exact
 export type AssignPromotionBody = z.infer<typeof assignPromotionBody>;
 
 export const idParams = z.object({ id: z.uuid() });
+
+export const MAX_PROMOTIONS_PAGE = 100;
+
+export const listPromotionsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_PROMOTIONS_PAGE).default(50),
+});

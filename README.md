@@ -72,6 +72,7 @@ listing that issued it — replaying it with a different `order` or
 
 | Method | Path | Notes |
 |--------|------|-------|
+| `GET`  | `/promotions` | Query: `limit` 1–100 (default 50). Newest first, `{ items }`. Each item is the promotion row plus `effective_status` (`SCHEDULED` \| `ACTIVE` \| `ENDED` \| `CANCELLED`: `status` evaluated against now) and the named target, `product: { id, sku, name, category_id }` or `category: { id, name }`. |
 | `POST` | `/promotions` | Body `{ name, product_id \| category_id (exactly one), discount_type: "PERCENTAGE" \| "FIXED", value, starts_at, ends_at }` (ISO 8601 with offset) → 201. Product-scope `FIXED` with `value >= base_price` → 400. |
 | `POST` | `/promotions/:id/cancel` | Sets `status = "CANCELLED"` and returns the row. Idempotent. Rows are never deleted. |
 | `POST` | `/promotions/:id/assign` | Body `{ product_id \| category_id }`. Re-targets an active promotion in one `UPDATE`. Cancelled promotion → 409. |

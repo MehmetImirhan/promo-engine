@@ -1,5 +1,5 @@
 /**
- * POST /promotions, /promotions/:id/cancel, /promotions/:id/assign through
+ * GET /promotions, POST /promotions, /promotions/:id/cancel, /promotions/:id/assign through
  * the HTTP layer: validation, the product-scope FIXED rule, the 409 body for
  * SQLSTATE 23P01, idempotent cancel, and re-targeting.
  */
@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Promotion } from '../../src/db/index.js';
 import type { ProductView } from '../../src/products/service.js';
+import type { PromotionListItem } from '../../src/promotions/service.js';
 import { startTestApp, type TestApp } from '../helpers/app.js';
 
 interface ErrorBody {
@@ -256,5 +257,45 @@ describe('POST /promotions/:id/assign', () => {
     const res = await app.post<ErrorBody>(`/promotions/${promo.id}/assign`, { category_id: catC });
     expect(res.status).toBe(409);
     expect(res.body.error.message).toMatch(/cancelled/i);
+  });
+});
+
+describe('GET /promotions', () => {
+  it('lists newest first with the named target and a status evaluated against now', async () => {
+    const [scheduledCat, endedCat, cancelledCat] = await Promise.all([category(), category(), category()]);
+    const target = await product(scheduledCat, '30.00');
+    const create = async (body: Record<string, string>): Promise<Promotion> =>
+      (await app.post<Promotion>('/promotions', { discount_type: 'PERCENTAGE', value: '10', ...body })).body;
+
+    const ended = await create({ name: 'Ended', category_id: endedCat, starts_at: at(-2 * HOUR), ends_at: at(-HOUR) });
+    const scheduled = await create({ name: 'Scheduled', category_id: scheduledCat, starts_at: at(HOUR), ends_at: at(2 * HOUR) });
+    const cancelled = await create({ name: 'Cancelled', category_id: cancelledCat, ...window });
+    await app.post(`/promotions/${cancelled.id}/cancel`);
+    const active = await create({ name: 'Active', product_id: target, ...window });
+
+    const res = await app.get<{ items: PromotionListItem[] }>('/promotions?limit=100');
+    expect(res.status).toBe(200);
+    const byId = new Map(res.body.items.map((p) => [p.id, p]));
+
+    expect(byId.get(ended.id)?.effective_status).toBe('ENDED');
+    expect(byId.get(scheduled.id)?.effective_status).toBe('SCHEDULED');
+    expect(byId.get(cancelled.id)).toMatchObject({ status: 'CANCELLED', effective_status: 'CANCELLED' });
+    expect(byId.get(active.id)).toMatchObject({
+      status: 'ACTIVE',
+      effective_status: 'ACTIVE',
+      value: '10.00',
+      product: { id: target, name: 'P', category_id: scheduledCat, sku: expect.stringMatching(/^PROMO-/) },
+      category: null,
+    });
+    expect(byId.get(scheduled.id)?.category).toMatchObject({ id: scheduledCat, name: expect.stringMatching(/^promo-api-/) });
+    expect(byId.get(scheduled.id)?.product).toBeNull();
+
+    const order = [active, cancelled, scheduled, ended].map((p) => res.body.items.findIndex((i) => i.id === p.id));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it('honours limit and rejects one above the maximum', async () => {
+    expect((await app.get<{ items: PromotionListItem[] }>('/promotions?limit=2')).body.items).toHaveLength(2);
+    expect((await app.get('/promotions?limit=101')).status).toBe(400);
   });
 });
